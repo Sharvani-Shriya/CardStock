@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+/* "static" keeps every variable in the output. Plain CSS below reads some of
+   them with var(), and Tailwind would otherwise drop variables it never saw
+   used in a utility class. */
+@theme static {
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+
+  /* Warm "paper and ink" palette. Text pairs meet WCAG AA (4.5:1): ink-soft is
+     about 5.2:1 on paper and 5.9:1 on a card, white on accent is about 5.2:1, and
+     accent-dark on the column background is about 6:1. */
+  --color-paper: #f5f0e6;
+  --color-paper-deep: #ebe4d4;
+  --color-card: #fffdf8;
+  --color-ink: #1f1a17;
+  --color-ink-soft: #6b625a;
+  --color-line: #d9d0bd;
+  --color-accent: #c2410c;
+  --color-accent-dark: #9a3412;
+  --color-ok: #2f7d4f;
+  --color-warn: #b7791f;
+
+  /* Border of text fields. "line" is only about 1.5:1 against white, far below
+     the 3:1 that WCAG 1.4.11 asks for on the edge of a form control. This one is
+     about 3.8:1 against white and about 3.2:1 against the column background. */
+  --color-field: #8a8176;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-paper);
+    /* A faint dot grid, like a notebook page, keeps the board from feeling flat. */
+    background-image: radial-gradient(var(--color-line) 1px, transparent 1px);
+    background-size: 24px 24px;
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* One clearly visible focus ring for every keyboard-reachable control. */
+  :focus-visible {
+    outline: 3px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Respect people who ask their OS to minimise motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

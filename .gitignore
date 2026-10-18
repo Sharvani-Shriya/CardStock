@@ -1,0 +1,20 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Secrets live in .env files; only the .env.example templates are committed
+.env
+.env.local
+.env.*.local
+
+# Playwright output (traces, screenshots, HTML report)
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Logs and tooling noise
+*.log
+*.tsbuildinfo
+.DS_Store
+.vscode/
+.idea/
