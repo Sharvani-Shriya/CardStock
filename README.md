@@ -2,21 +2,7 @@
 
 A Kanban board (UI name: **Cardstock**) where every change appears in all open browser windows within moments, without a refresh. Changes also feel instant to the person making them, and if the server rejects or cannot be reached, the screen rolls back and says so.
 
-**Live demo:** _add the deployed URL here, for example `https://your-app.vercel.app`_
-
-## Screenshots
-
-> **Placeholder:** board overview with three columns (`docs/screenshots/board.png`)
->
-> **Placeholder:** two windows side by side showing a card arriving in the second window (`docs/screenshots/realtime.png`)
->
-> **Placeholder:** error toast after a failed action (`docs/screenshots/rollback.png`)
-
-<!-- After adding the images, replace the placeholders above with:
-![Board overview](docs/screenshots/board.png)
-![Real-time sync](docs/screenshots/realtime.png)
-![Rollback toast](docs/screenshots/rollback.png)
--->
+**Live demo:**  `https://card-stock-gules.vercel.app/`
 
 ## Contents
 
