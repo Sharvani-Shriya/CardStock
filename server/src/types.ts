@@ -27,3 +27,11 @@ export type ServerEvent =
   // columnIds tells receivers which columns to replace wholesale, which matters
   // when a column ends up empty and therefore has no cards in the list.
   | { type: "cards:reordered"; columnIds: string[]; cards: CardDto[] };
+
+// The authenticated user attached to req.user by the requireAuth middleware.
+// Using a dedicated interface (rather than typing req.user as `any`) keeps
+// every downstream handler fully typed.
+export interface AuthUser {
+  id: string;     // MongoDB _id as a string
+  email: string;
+}

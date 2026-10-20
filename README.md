@@ -296,12 +296,39 @@ Open the client in two browser windows to see the real-time sync.
 | server | `npm run build` | Compiles TypeScript to `dist/` |
 | server | `npm start` | Runs the compiled server (`node dist/index.js`) |
 | server | `npm run typecheck` | Type-checks without emitting files |
+| server | `npm test` | Runs server integration tests (auth and board routes) |
+| server | `npm run migrate:orphans` | See [Orphaned data migration](#orphaned-data-migration) below |
 | client | `npm run dev` | Starts the Vite dev server |
 | client | `npm run build` | Type-checks, then builds to `dist/` |
 | client | `npm run preview` | Serves the production build locally |
 | client | `npm run typecheck` | Type-checks without emitting files |
 | client | `npm test` / `npm run test:watch` | Unit and component tests (once / in watch mode) |
 | client | `npm run test:e2e` | Playwright end-to-end tests |
+
+### Orphaned data migration
+
+If your database has columns or cards that were created **before authentication was added** (i.e. they have no `userId`), you need to run the migration script once. Without it, those documents are invisible to all users.
+
+First, check how many orphans exist (read-only):
+
+```bash
+cd server
+npm run migrate:orphans
+```
+
+Then, either assign them to an existing user:
+
+```bash
+npm run migrate:orphans -- --assign-to alice@example.com
+```
+
+Or delete them permanently:
+
+```bash
+npm run migrate:orphans -- --delete
+```
+
+`--assign-to` and `--delete` are mutually exclusive. The script reads `MONGODB_URI` from `server/.env`.
 
 ## Environment variables
 
@@ -312,8 +339,11 @@ Open the client in two browser windows to see the real-time sync.
 | `PORT` | no | `4000` | Port for HTTP and WebSocket |
 | `MONGODB_URI` | **yes** | none | MongoDB connection string. Include the database name, for example `.../kanban` |
 | `CLIENT_ORIGIN` | no | `http://localhost:5173` | Origin(s) allowed by CORS. Comma-separated for several. Must match exactly: scheme, host and port, with **no trailing slash** |
+| `JWT_ACCESS_SECRET` | **yes** | none | Secret for signing access tokens. At least 32 characters. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `JWT_REFRESH_SECRET` | **yes** | none | Secret for signing refresh tokens. At least 32 characters. Must differ from `JWT_ACCESS_SECRET` |
+| `COOKIE_SECURE` | no | `false` | Set to `true` whenever the server is behind HTTPS (always in production). Controls the `Secure` flag on the refresh cookie |
 
-The server validates these at startup and exits with a clear message if they are invalid.
+The server validates all variables at startup and exits with a clear message if any are invalid. In production, both JWT secrets are required and must be at least 32 characters.
 
 ### Client (`client/.env`)
 
@@ -330,7 +360,21 @@ Vite reads `VITE_*` variables **at build time** and bakes them into the bundle, 
 | --- | --- | --- |
 | `E2E_MONGODB_URI` | `mongodb://127.0.0.1:27017/kanban_e2e` | Database used by the Playwright tests. Read from the shell, not from `.env` files. The database name must contain `e2e` |
 
-## Testing
+### Server integration tests (Vitest + Supertest)
+
+```bash
+cd server
+npm test
+```
+
+These spin up an in-memory MongoDB instance with `mongodb-memory-server` (no real database needed) and drive the Express app through `supertest`. They cover:
+
+- Registration, login, refresh (with token rotation), logout, logout-all, and the `/me` endpoint.
+- Generic error messages that do not reveal whether an email is registered.
+- Per-user data isolation: user A cannot see or modify user B's columns or cards.
+- Auth gating: every board endpoint returns 401 without a valid Bearer token.
+
+The mongod binary version is pinned in `tests/helpers/db.ts` via the `MONGOMS_VERSION` environment variable. CI can cache the binary at `~/.cache/mongodb-binaries` to avoid re-downloading it on every run.
 
 ### Unit and component tests (Vitest)
 

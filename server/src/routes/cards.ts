@@ -1,25 +1,34 @@
 import { Router } from "express";
 import { Types } from "mongoose";
-import { HttpError } from "../errors";
-import { getClientId, parseWith } from "../http";
-import { Card } from "../models/Card";
-import { Column } from "../models/Column";
-import { broadcast } from "../realtime";
-import { createCardBody, idParams, moveCardBody, updateCardBody } from "../schemas";
-import { toCardDto } from "../serializers";
+import { HttpError } from "../errors.js";
+import { getClientId, parseWith } from "../http.js";
+import { requireAuth } from "../middleware/authenticate.js";
+import { Card } from "../models/Card.js";
+import { Column } from "../models/Column.js";
+import { broadcast } from "../realtime.js";
+import { createCardBody, idParams, moveCardBody, updateCardBody } from "../schemas.js";
+import { toCardDto } from "../serializers.js";
 
 export const cardsRouter = Router();
 
-cardsRouter.post("/", async (req, res) => {
+// All card routes require authentication.  The userId is taken from the
+// verified token so a user can never forge ownership.
+
+cardsRouter.post("/", requireAuth, async (req, res) => {
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const userId = req.user!.id;
   const body = parseWith(createCardBody, req.body);
 
-  const columnExists = await Column.exists({ _id: body.columnId });
+  // Verify that the target column belongs to this user — otherwise a user
+  // could add cards to someone else's column by guessing its id.
+  const columnExists = await Column.exists({ _id: body.columnId, userId });
   if (!columnExists) throw new HttpError(404, "Column not found");
 
   // "Last position + 1" instead of a count: a deleted card leaves a gap, and a
   // count would then collide with an existing position.
-  const last = await Card.findOne({ columnId: body.columnId }).sort({ position: -1 });
+  const last = await Card.findOne({ columnId: body.columnId, userId }).sort({ position: -1 });
   const card = await Card.create({
+    userId,
     columnId: body.columnId,
     title: body.title,
     description: body.description,
@@ -33,14 +42,17 @@ cardsRouter.post("/", async (req, res) => {
 
 // Registered before "/:id" for readability only; the paths cannot clash
 // because "/:id/move" has an extra segment.
-cardsRouter.patch("/:id/move", async (req, res) => {
+cardsRouter.patch("/:id/move", requireAuth, async (req, res) => {
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const userId = req.user!.id;
   const { id } = parseWith(idParams, req.params);
   const body = parseWith(moveCardBody, req.body);
 
-  const card = await Card.findById(id);
+  const card = await Card.findOne({ _id: id, userId });
   if (!card) throw new HttpError(404, "Card not found");
 
-  const targetExists = await Column.exists({ _id: body.columnId });
+  // Verify the target column also belongs to this user.
+  const targetExists = await Column.exists({ _id: body.columnId, userId });
   if (!targetExists) throw new HttpError(404, "Column not found");
 
   const sourceColumnId = card.columnId.toString();
@@ -52,6 +64,7 @@ cardsRouter.patch("/:id/move", async (req, res) => {
   // simply means "the bottom" instead of being an error.
   const targetCards = await Card.find({
     columnId: targetColumnId,
+    userId,
     _id: { $ne: card._id },
   }).sort({ position: 1, _id: 1 });
 
@@ -67,7 +80,7 @@ cardsRouter.patch("/:id/move", async (req, res) => {
       const unchanged =
         item.position === index && item.columnId.toString() === targetColumnId;
       if (unchanged) return;
-      await Card.updateOne({ _id: item._id }, { columnId: targetObjectId, position: index });
+      await Card.updateOne({ _id: item._id, userId }, { columnId: targetObjectId, position: index });
     }),
   );
 
@@ -75,13 +88,14 @@ cardsRouter.patch("/:id/move", async (req, res) => {
   if (sourceColumnId !== targetColumnId) {
     const sourceCards = await Card.find({
       columnId: sourceColumnId,
+      userId,
       _id: { $ne: card._id },
     }).sort({ position: 1, _id: 1 });
 
     await Promise.all(
       sourceCards.map(async (item, index) => {
         if (item.position === index) return;
-        await Card.updateOne({ _id: item._id }, { position: index });
+        await Card.updateOne({ _id: item._id, userId }, { position: index });
       }),
     );
   }
@@ -91,7 +105,7 @@ cardsRouter.patch("/:id/move", async (req, res) => {
   const affectedColumnIds =
     sourceColumnId === targetColumnId ? [targetColumnId] : [sourceColumnId, targetColumnId];
 
-  const affectedCards = await Card.find({ columnId: { $in: affectedColumnIds } }).sort({
+  const affectedCards = await Card.find({ columnId: { $in: affectedColumnIds }, userId }).sort({
     position: 1,
     _id: 1,
   });
@@ -101,11 +115,17 @@ cardsRouter.patch("/:id/move", async (req, res) => {
   res.json({ cards });
 });
 
-cardsRouter.patch("/:id", async (req, res) => {
+cardsRouter.patch("/:id", requireAuth, async (req, res) => {
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const userId = req.user!.id;
   const { id } = parseWith(idParams, req.params);
   const changes = parseWith(updateCardBody, req.body);
 
-  const card = await Card.findByIdAndUpdate(id, changes, { new: true, runValidators: true });
+  const card = await Card.findOneAndUpdate(
+    { _id: id, userId },
+    changes,
+    { new: true, runValidators: true },
+  );
   if (!card) throw new HttpError(404, "Card not found");
 
   const dto = toCardDto(card);
@@ -113,10 +133,12 @@ cardsRouter.patch("/:id", async (req, res) => {
   res.json(dto);
 });
 
-cardsRouter.delete("/:id", async (req, res) => {
+cardsRouter.delete("/:id", requireAuth, async (req, res) => {
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const userId = req.user!.id;
   const { id } = parseWith(idParams, req.params);
 
-  const card = await Card.findByIdAndDelete(id);
+  const card = await Card.findOneAndDelete({ _id: id, userId });
   if (!card) throw new HttpError(404, "Card not found");
 
   // Positions are left with a gap on purpose: order is all that matters, and

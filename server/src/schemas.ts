@@ -50,3 +50,26 @@ export const clientIdSchema = z.string().min(1).max(100);
 // The only message a WebSocket client is allowed to send: an app-level ping.
 // Browsers cannot send protocol-level ping frames, so this is their keep-alive.
 export const clientMessageSchema = z.object({ type: z.literal("ping") }).strict();
+
+// Auth schemas -----------------------------------------------------------
+
+// A minimal password policy: long enough to resist brute force, short enough
+// not to frustrate users.  Complexity rules are deliberately omitted; length
+// is the strongest single factor.
+const password = z.string().min(8, "Password must be at least 8 characters").max(72);
+// 72 chars is bcrypt's effective maximum; anything longer is silently truncated
+// by the algorithm, which could confuse users who change only the tail.
+
+export const registerBody = z
+  .object({
+    email: z.string().email("Must be a valid email address").max(254),
+    password,
+  })
+  .strict();
+
+export const loginBody = z
+  .object({
+    email: z.string().email("Must be a valid email address").max(254),
+    password,
+  })
+  .strict();
