@@ -134,6 +134,28 @@ describe("POST /api/auth/register", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("enforces the 72-byte password limit on multi-byte characters", async () => {
+    // 19 emojis (🔒 = 4 bytes each = 76 bytes total, but only 38 characters length)
+    const longBytePassword = "🔒".repeat(19);
+    expect(longBytePassword.length).toBeLessThanOrEqual(72);
+    expect(Buffer.byteLength(longBytePassword, "utf8")).toBeGreaterThan(72);
+
+    const res = await request(app)
+      .post("/api/auth/register")
+      .send({ email: "multibyte@example.com", password: longBytePassword });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.fieldErrors.password[0]).toMatch(/72 bytes/i);
+
+    // Valid multi-byte password: 15 emojis = 60 bytes <= 72
+    const validBytePassword = "🔒".repeat(15);
+    const validRes = await request(app)
+      .post("/api/auth/register")
+      .send({ email: "multibyte-valid@example.com", password: validBytePassword });
+
+    expect(validRes.status).toBe(201);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -267,6 +289,24 @@ describe("POST /api/auth/refresh", () => {
       .set("Cookie", "refreshToken=garbage");
 
     expect(res.status).toBe(401);
+  });
+
+  it("handles the parallel refresh race by ensuring exactly one succeeds", async () => {
+    const { cookie } = await registerUser("race@example.com");
+
+    const [res1, res2] = await Promise.all([
+      request(app)
+        .post("/api/auth/refresh")
+        .set("x-skip-rate-limit", "true")
+        .set("Cookie", cookie),
+      request(app)
+        .post("/api/auth/refresh")
+        .set("x-skip-rate-limit", "true")
+        .set("Cookie", cookie),
+    ]);
+
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual([200, 401]);
   });
 });
 

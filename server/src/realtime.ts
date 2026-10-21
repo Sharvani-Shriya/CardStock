@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
+import mongoose from "mongoose";
 import { WebSocket, WebSocketServer } from "ws";
-import { clientMessageSchema } from "./schemas";
-import type { ServerEvent } from "./types";
+import { config } from "./config.js";
+import { Board } from "./models/Board.js";
+import { clientMessageSchema } from "./schemas.js";
+import type { ServerEvent } from "./types.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -41,12 +44,29 @@ setInterval(() => {
   }
 }, 30_000);
 
-export function attachWebSocketServer(server: Server): WebSocketServer {
+interface WebSocketServerOptions {
+  clientOrigin?: string;
+}
+
+export function attachWebSocketServer(server: Server, options?: WebSocketServerOptions): WebSocketServer {
   // Clients only ever send tiny messages, so a small cap protects us from
   // someone sending huge frames.
   const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 16 * 1024 });
 
-  wss.on("connection", (socket, request) => {
+  wss.on("connection", async (socket, request) => {
+    // Check Origin header if present. A missing Origin is allowed (non-browser clients).
+    const originHeader = request.headers.origin;
+    if (typeof originHeader === "string") {
+      const allowed = (options?.clientOrigin ?? config.CLIENT_ORIGIN)
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean);
+      if (!allowed.includes(originHeader)) {
+        socket.close(4003, "Origin not allowed");
+        return;
+      }
+    }
+
     // The request URL is relative ("/ws?clientId=..."), so give URL a dummy base.
     const url = new URL(request.url ?? "/ws", "http://localhost");
     const clientId = url.searchParams.get("clientId") ?? "";
@@ -66,6 +86,17 @@ export function attachWebSocketServer(server: Server): WebSocketServer {
         socket.close(4002, "Expired ticket");
         return;
       }
+
+      // Re-check on connect that the board still exists and belongs to the user
+      if (mongoose.connection.readyState === 1) {
+        const boardExists = await Board.exists({ _id: stored.boardId, userId: stored.userId });
+        if (!boardExists) {
+          wsTickets.delete(ticketParam);
+          socket.close(4004, "Board not found");
+          return;
+        }
+      }
+
       // Valid ticket: consume immediately so it cannot be reused
       userId = stored.userId;
       boardId = stored.boardId;
@@ -132,14 +163,15 @@ export function attachWebSocketServer(server: Server): WebSocketServer {
 }
 
 // Sends an event to connected clients.
-// If boardId is provided, sends ONLY to clients tuned to the same board.
+// A socket receives an event ONLY if its boardId strictly equals the event's boardId.
+// Sockets with no boardId (not yet authenticated) must never receive events.
 // Skips the senderClientId so optimistic UI isn't flickered.
-export function broadcast(event: ServerEvent, senderClientId?: string, boardId?: string): void {
+export function broadcast(event: ServerEvent, senderClientId: string | undefined, boardId: string): void {
   const message = JSON.stringify(event);
 
   for (const [socket, info] of clients) {
     if (senderClientId && info.clientId === senderClientId) continue;
-    if (boardId && info.boardId && info.boardId !== boardId) continue;
+    if (!info.boardId || info.boardId !== boardId) continue;
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(message);
     }

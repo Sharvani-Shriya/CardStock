@@ -147,4 +147,45 @@ describe("WebSocket Real-Time Broadcast Isolation", () => {
     receiverA.close();
     receiverB.close();
   });
+
+  it("a socket without a ticket receives no events during the grace window", async () => {
+    // Open a connection without a ticket (within its 5s grace window)
+    const unauthenticated = new WebSocket(`${wsUrl}?clientId=eavesdropper`);
+    await new Promise<void>((resolve) => unauthenticated.on("open", resolve));
+
+    const receivedMessages: any[] = [];
+    unauthenticated.on("message", (data) => receivedMessages.push(JSON.parse(data.toString())));
+
+    // Broadcast an event to Board A
+    broadcast(
+      {
+        type: "column:created",
+        column: { id: "col-secret", title: "Secret Column", position: 0 },
+      },
+      undefined,
+      "board-A",
+    );
+
+    // Wait for delivery
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Sockets with no boardId must never receive events
+    expect(receivedMessages.length).toBe(0);
+
+    unauthenticated.close();
+  });
+
+  it("rejects a WebSocket connection from a disallowed Origin header", async () => {
+    const ticket = issueWsTicket("user-1", "board-1");
+    const ws = new WebSocket(`${wsUrl}?ticket=${ticket}&clientId=disallowed-client`, {
+      headers: { Origin: "https://evil-hacker.com" },
+    });
+
+    const closeEvent = await new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+
+    expect(closeEvent.code).toBe(4003);
+    expect(closeEvent.reason).toMatch(/origin not allowed/i);
+  });
 });

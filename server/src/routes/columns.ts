@@ -28,7 +28,7 @@ columnsRouter.post("/", requireAuth, async (req, res) => {
   });
 
   const dto = toColumnDto(column);
-  broadcast({ type: "column:created", column: dto }, getClientId(req));
+  broadcast({ type: "column:created", column: dto }, getClientId(req), column.boardId?.toString() ?? "");
   res.status(201).json(dto);
 });
 
@@ -48,7 +48,7 @@ columnsRouter.patch("/:id", requireAuth, async (req, res) => {
   if (!column) throw new HttpError(404, "Column not found");
 
   const dto = toColumnDto(column);
-  broadcast({ type: "column:updated", column: dto }, getClientId(req));
+  broadcast({ type: "column:updated", column: dto }, getClientId(req), column.boardId?.toString() ?? "");
   res.json(dto);
 });
 
@@ -64,6 +64,6 @@ columnsRouter.delete("/:id", requireAuth, async (req, res) => {
   // same locally when they see column:deleted, so no extra event is needed.
   await Card.deleteMany({ columnId: id, userId });
 
-  broadcast({ type: "column:deleted", id }, getClientId(req));
+  broadcast({ type: "column:deleted", id }, getClientId(req), column.boardId?.toString() ?? "");
   res.status(204).end();
 });

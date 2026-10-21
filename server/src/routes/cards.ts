@@ -36,7 +36,8 @@ cardsRouter.post("/", requireAuth, async (req, res) => {
   });
 
   const dto = toCardDto(card);
-  broadcast({ type: "card:created", card: dto }, getClientId(req));
+  const column = await Column.findOne({ _id: body.columnId, userId });
+  broadcast({ type: "card:created", card: dto }, getClientId(req), column?.boardId?.toString() ?? "");
   res.status(201).json(dto);
 });
 
@@ -111,7 +112,12 @@ cardsRouter.patch("/:id/move", requireAuth, async (req, res) => {
   });
   const cards = affectedCards.map(toCardDto);
 
-  broadcast({ type: "cards:reordered", columnIds: affectedColumnIds, cards }, getClientId(req));
+  const targetCol = await Column.findOne({ _id: targetColumnId, userId });
+  broadcast(
+    { type: "cards:reordered", columnIds: affectedColumnIds, cards },
+    getClientId(req),
+    targetCol?.boardId?.toString() ?? "",
+  );
   res.json({ cards });
 });
 
@@ -129,7 +135,8 @@ cardsRouter.patch("/:id", requireAuth, async (req, res) => {
   if (!card) throw new HttpError(404, "Card not found");
 
   const dto = toCardDto(card);
-  broadcast({ type: "card:updated", card: dto }, getClientId(req));
+  const cardCol = await Column.findOne({ _id: card.columnId, userId });
+  broadcast({ type: "card:updated", card: dto }, getClientId(req), cardCol?.boardId?.toString() ?? "");
   res.json(dto);
 });
 
@@ -143,6 +150,11 @@ cardsRouter.delete("/:id", requireAuth, async (req, res) => {
 
   // Positions are left with a gap on purpose: order is all that matters, and
   // the next move in this column renumbers everything anyway.
-  broadcast({ type: "card:deleted", id, columnId: card.columnId.toString() }, getClientId(req));
+  const cardCol = await Column.findOne({ _id: card.columnId, userId });
+  broadcast(
+    { type: "card:deleted", id, columnId: card.columnId.toString() },
+    getClientId(req),
+    cardCol?.boardId?.toString() ?? "",
+  );
   res.status(204).end();
 });

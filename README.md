@@ -496,10 +496,17 @@ Create a **Web Service** pointing to the repository:
 | `MONGODB_URI` | Your MongoDB Atlas connection string |
 | `CLIENT_ORIGIN` | `https://<your-vercel-app>.vercel.app` (no trailing slash) |
 | `JWT_ACCESS_SECRET` | 48-byte secret generated via `openssl rand -base64 48` |
-| `JWT_REFRESH_SECRET` | Different 48-byte secret generated via `openssl rand -base64 48` |
 | `COOKIE_SECURE` | `true` |
+| `TRUST_PROXY_HOPS` | `2` (when traffic routes via Vercel rewrites -> Render proxy) or `1` (if calling Render directly) |
 
 *(Render automatically assigns `PORT`)*.
+
+> [!NOTE]
+> **Proxy Hops & Rate Limiting Verification:**
+> Because the production deployment path is **Vercel rewrite -> Render**, incoming HTTP requests traverse two reverse proxy hops: Vercel Edge Proxy, then Render's internal load balancer. Setting `TRUST_PROXY_HOPS=2` instructs Express to extract the original client IP from `X-Forwarded-For` across both hops so that rate limiting (`authLimiter`) isolates individual users instead of blocking the entire proxy pool.
+>
+> **Temporary Verification (remove after confirming):**
+> To verify `req.ip` in production: temporarily log `console.log("Resolved IP:", req.ip, "X-Forwarded-For:", req.headers["x-forwarded-for"])` inside the `GET /api/health` handler in `server/src/app.ts`, trigger the health endpoint from your browser, and check the Render dashboard logs to confirm `req.ip` reflects your public client IP rather than an internal proxy address (`10.x.x.x`). Remove the debug line after verifying.
 
 ### 3. Client on Vercel
 

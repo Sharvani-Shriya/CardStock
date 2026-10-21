@@ -78,7 +78,7 @@ boardsRouter.get("/:boardId", async (req, res) => {
 
   const columns = await Column.find({
     userId,
-    $or: [{ boardId }, { boardId: { $exists: false } }],
+    boardId,
   }).sort({ position: 1, _id: 1 });
 
   const columnIds = columns.map((col) => col._id);
@@ -168,8 +168,11 @@ boardsRouter.patch("/:boardId/columns/:id", async (req, res) => {
   const { boardId, id } = parseWith(boardAndIdParams, req.params);
   const body = parseWith(updateColumnBody, req.body);
 
+  const boardExists = await Board.exists({ _id: boardId, userId });
+  if (!boardExists) throw new HttpError(404, "Board not found");
+
   const column = await Column.findOneAndUpdate(
-    { _id: id, userId },
+    { _id: id, userId, boardId },
     { title: body.title },
     { new: true },
   );
@@ -185,7 +188,10 @@ boardsRouter.delete("/:boardId/columns/:id", async (req, res) => {
   const userId = req.user!.id;
   const { boardId, id } = parseWith(boardAndIdParams, req.params);
 
-  const column = await Column.findOneAndDelete({ _id: id, userId });
+  const boardExists = await Board.exists({ _id: boardId, userId });
+  if (!boardExists) throw new HttpError(404, "Board not found");
+
+  const column = await Column.findOneAndDelete({ _id: id, userId, boardId });
   if (!column) throw new HttpError(404, "Column not found");
 
   await Card.deleteMany({ columnId: id, userId });
@@ -203,7 +209,10 @@ boardsRouter.post("/:boardId/cards", async (req, res) => {
   const { boardId } = parseWith(boardIdParams, req.params);
   const body = parseWith(createCardBody, req.body);
 
-  const columnExists = await Column.exists({ _id: body.columnId, userId });
+  const boardExists = await Board.exists({ _id: boardId, userId });
+  if (!boardExists) throw new HttpError(404, "Board not found");
+
+  const columnExists = await Column.exists({ _id: body.columnId, userId, boardId });
   if (!columnExists) throw new HttpError(404, "Column not found");
 
   const last = await Card.findOne({ columnId: body.columnId, userId }).sort({ position: -1 });
@@ -226,8 +235,18 @@ boardsRouter.patch("/:boardId/cards/:id", async (req, res) => {
   const { boardId, id } = parseWith(boardAndIdParams, req.params);
   const body = parseWith(updateCardBody, req.body);
 
-  const card = await Card.findOneAndUpdate({ _id: id, userId }, body, { new: true });
+  const boardExists = await Board.exists({ _id: boardId, userId });
+  if (!boardExists) throw new HttpError(404, "Board not found");
+
+  const card = await Card.findOne({ _id: id, userId });
   if (!card) throw new HttpError(404, "Card not found");
+
+  const column = await Column.findOne({ _id: card.columnId, userId, boardId });
+  if (!column) throw new HttpError(404, "Card not found");
+
+  if (body.title !== undefined) card.title = body.title;
+  if (body.description !== undefined) card.description = body.description;
+  await card.save();
 
   const dto = toCardDto(card);
   broadcast({ type: "card:updated", card: dto }, getClientId(req), boardId);
@@ -239,8 +258,16 @@ boardsRouter.delete("/:boardId/cards/:id", async (req, res) => {
   const userId = req.user!.id;
   const { boardId, id } = parseWith(boardAndIdParams, req.params);
 
-  const card = await Card.findOneAndDelete({ _id: id, userId });
+  const boardExists = await Board.exists({ _id: boardId, userId });
+  if (!boardExists) throw new HttpError(404, "Board not found");
+
+  const card = await Card.findOne({ _id: id, userId });
   if (!card) throw new HttpError(404, "Card not found");
+
+  const column = await Column.findOne({ _id: card.columnId, userId, boardId });
+  if (!column) throw new HttpError(404, "Card not found");
+
+  await card.deleteOne();
 
   broadcast(
     { type: "card:deleted", id, columnId: card.columnId.toString() },
@@ -256,11 +283,19 @@ boardsRouter.patch("/:boardId/cards/:id/move", async (req, res) => {
   const { boardId, id } = parseWith(boardAndIdParams, req.params);
   const body = parseWith(moveCardBody, req.body);
 
+  const boardExists = await Board.exists({ _id: boardId, userId });
+  if (!boardExists) throw new HttpError(404, "Board not found");
+
   const card = await Card.findOne({ _id: id, userId });
   if (!card) throw new HttpError(404, "Card not found");
 
-  const targetExists = await Column.exists({ _id: body.columnId, userId });
-  if (!targetExists) throw new HttpError(404, "Column not found");
+  // Verify the source card's column belongs to this board and user
+  const sourceColumn = await Column.findOne({ _id: card.columnId, userId, boardId });
+  if (!sourceColumn) throw new HttpError(404, "Card not found");
+
+  // Verify the target column belongs to this board and user
+  const targetColumn = await Column.findOne({ _id: body.columnId, userId, boardId });
+  if (!targetColumn) throw new HttpError(404, "Column not found");
 
   const sourceColumnId = card.columnId.toString();
   const targetColumnId = body.columnId;

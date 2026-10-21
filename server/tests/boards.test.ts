@@ -60,6 +60,19 @@ describe("Authentication & Token Verification for /api/boards", () => {
       .set("Authorization", `Bearer ${expiredToken}`);
     expect(res.status).toBe(401);
   });
+
+  it("returns 401 when token is signed with an unapproved algorithm (e.g. HS384)", async () => {
+    const { userId } = await createUser("alg@example.com");
+    const invalidAlgToken = jwt.sign(
+      { sub: userId, email: "alg@example.com" },
+      config.JWT_ACCESS_SECRET,
+      { algorithm: "HS384" },
+    );
+    const res = await request(app)
+      .get("/api/boards")
+      .set("Authorization", `Bearer ${invalidAlgToken}`);
+    expect(res.status).toBe(401);
+  });
 });
 
 describe("Board CRUD & User Isolation", () => {
@@ -137,6 +150,27 @@ describe("Board CRUD & User Isolation", () => {
       .delete(`/api/boards/${boardId}`)
       .set("Authorization", `Bearer ${userBToken}`);
     expect(delRes.status).toBe(404);
+  });
+
+  it("user B cannot get a ws-ticket for user A's board", async () => {
+    const { token: userAToken } = await createUser("userA-ws@example.com");
+    const { token: userBToken } = await createUser("userB-ws@example.com");
+
+    const boardRes = await request(app)
+      .post("/api/boards")
+      .set("Authorization", `Bearer ${userAToken}`)
+      .send({ title: "Alice Private Board" });
+
+    const aliceBoardId = boardRes.body.id;
+
+    // Bob tries to request a WebSocket ticket for Alice's board -> 404
+    const ticketRes = await request(app)
+      .post("/api/auth/ws-ticket")
+      .set("Authorization", `Bearer ${userBToken}`)
+      .send({ boardId: aliceBoardId });
+
+    expect(ticketRes.status).toBe(404);
+    expect(ticketRes.body.error.message).toMatch(/board not found/i);
   });
 });
 
@@ -309,6 +343,108 @@ describe("Column and Card CRUD inside a Board", () => {
       .set("Authorization", `Bearer ${tokenB}`)
       .send({ columnId: colId, position: 0 });
     expect(moveCardRes.status).toBe(404);
+  });
+
+  it("cross-board create, move, update and delete return 404 and broadcast nothing to either board", async () => {
+    const { token } = await createUser("crossboard@example.com");
+
+    // Create Board 1 with Column 1 and Card 1
+    const b1 = (
+      await request(app)
+        .post("/api/boards")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ title: "Board 1" })
+    ).body;
+    const c1 = (
+      await request(app)
+        .post(`/api/boards/${b1.id}/columns`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ title: "Column 1" })
+    ).body;
+    const card1 = (
+      await request(app)
+        .post(`/api/boards/${b1.id}/cards`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ columnId: c1.id, title: "Card 1" })
+    ).body;
+
+    // Create Board 2 with Column 2 and Card 2
+    const b2 = (
+      await request(app)
+        .post("/api/boards")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ title: "Board 2" })
+    ).body;
+    const c2 = (
+      await request(app)
+        .post(`/api/boards/${b2.id}/columns`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ title: "Column 2" })
+    ).body;
+    const card2 = (
+      await request(app)
+        .post(`/api/boards/${b2.id}/cards`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ columnId: c2.id, title: "Card 2" })
+    ).body;
+
+    // 1. Cross-board create: attempt to create a card in Column 2 via Board 1's URL -> 404
+    const createCross = await request(app)
+      .post(`/api/boards/${b1.id}/cards`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ columnId: c2.id, title: "Cross Card" });
+    expect(createCross.status).toBe(404);
+
+    // 2. Cross-board column update: attempt to rename Column 2 via Board 1's URL -> 404
+    const patchColCross = await request(app)
+      .patch(`/api/boards/${b1.id}/columns/${c2.id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ title: "Hacked Column" });
+    expect(patchColCross.status).toBe(404);
+
+    // 3. Cross-board column delete: attempt to delete Column 2 via Board 1's URL -> 404
+    const delColCross = await request(app)
+      .delete(`/api/boards/${b1.id}/columns/${c2.id}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(delColCross.status).toBe(404);
+
+    // 4. Cross-board card update: attempt to update Card 2 via Board 1's URL -> 404
+    const patchCardCross = await request(app)
+      .patch(`/api/boards/${b1.id}/cards/${card2.id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ title: "Hacked Card" });
+    expect(patchCardCross.status).toBe(404);
+
+    // 5. Cross-board card delete: attempt to delete Card 2 via Board 1's URL -> 404
+    const delCardCross = await request(app)
+      .delete(`/api/boards/${b1.id}/cards/${card2.id}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(delCardCross.status).toBe(404);
+
+    // 6. Cross-board card move: attempt to move Card 1 to Column 2 via Board 1's URL -> 404
+    const moveCrossTarget = await request(app)
+      .patch(`/api/boards/${b1.id}/cards/${card1.id}/move`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ columnId: c2.id, position: 0 });
+    expect(moveCrossTarget.status).toBe(404);
+
+    // 7. Cross-board card move: attempt to move Card 2 (on Board 2) via Board 1's URL -> 404
+    const moveCrossSource = await request(app)
+      .patch(`/api/boards/${b1.id}/cards/${card2.id}/move`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ columnId: c1.id, position: 0 });
+    expect(moveCrossSource.status).toBe(404);
+
+    // Verify all original entities are completely unchanged in DB
+    const col2Check = await Column.findById(c2.id);
+    expect(col2Check?.title).toBe("Column 2");
+
+    const card2Check = await Card.findById(card2.id);
+    expect(card2Check?.title).toBe("Card 2");
+    expect(card2Check?.columnId.toString()).toBe(c2.id);
+
+    const card1Check = await Card.findById(card1.id);
+    expect(card1Check?.columnId.toString()).toBe(c1.id);
   });
 });
 

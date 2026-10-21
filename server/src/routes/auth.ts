@@ -17,6 +17,7 @@ import { config } from "../config.js";
 import { HttpError } from "../errors.js";
 import { parseWith } from "../http.js";
 import { requireAuth } from "../middleware/authenticate.js";
+import { Board } from "../models/Board.js";
 import { RefreshToken } from "../models/RefreshToken.js";
 import { User } from "../models/User.js";
 import { issueWsTicket } from "../realtime.js";
@@ -148,31 +149,27 @@ authRouter.post("/refresh", authLimiter, async (req, res) => {
   }
 
   const tokenHash = hashRefreshToken(rawToken);
-  const stored = await RefreshToken.findOne({ tokenHash });
+  const now = new Date();
+
+  // Atomically find and flip isUsed only if it is currently false and not expired.
+  // This guarantees that parallel requests with the same token cannot both rotate it.
+  const stored = await RefreshToken.findOneAndUpdate(
+    { tokenHash, isUsed: false, expiresAt: { $gt: now } },
+    { $set: { isUsed: true } },
+    { new: false },
+  );
 
   if (!stored) {
-    // The token is not in the database: either it was already revoked or it never existed.
+    // If no active token was updated, check if it was already rotated (reuse attempt)
+    const reused = await RefreshToken.findOne({ tokenHash, isUsed: true });
+    if (reused) {
+      // REUSE ATTACK DETECTED: A rotated-out refresh token was presented again!
+      // Revoke the entire family immediately to protect against token theft.
+      await RefreshToken.deleteMany({ familyId: reused.familyId });
+    }
     clearRefreshCookie(res);
     throw new HttpError(401, "Invalid or expired refresh token");
   }
-
-  if (stored.isUsed) {
-    // REUSE ATTACK DETECTED: A rotated-out refresh token was presented again!
-    // Revoke the entire family immediately to protect against token theft.
-    await RefreshToken.deleteMany({ familyId: stored.familyId });
-    clearRefreshCookie(res);
-    throw new HttpError(401, "Invalid or expired refresh token");
-  }
-
-  if (stored.expiresAt < new Date()) {
-    await stored.deleteOne();
-    clearRefreshCookie(res);
-    throw new HttpError(401, "Refresh token expired");
-  }
-
-  // Mark the current token as used so any replay will trigger family revocation.
-  stored.isUsed = true;
-  await stored.save();
 
   const { familyId } = stored;
   const userId = (stored.userId as { toString(): string }).toString();
@@ -247,9 +244,16 @@ authRouter.get("/me", requireAuth, (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/auth/ws-ticket — acquire single-use WebSocket ticket for a board
 // ---------------------------------------------------------------------------
-authRouter.post("/ws-ticket", requireAuth, (req, res) => {
+authRouter.post("/ws-ticket", requireAuth, async (req, res) => {
   const body = parseWith(wsTicketBody, req.body);
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const ticket = issueWsTicket(req.user!.id, body.boardId);
+  const userId = req.user!.id;
+
+  const boardExists = await Board.exists({ _id: body.boardId, userId });
+  if (!boardExists) {
+    throw new HttpError(404, "Board not found");
+  }
+
+  const ticket = issueWsTicket(userId, body.boardId);
   res.json({ ticket });
 });

@@ -56,8 +56,14 @@ export const clientMessageSchema = z.object({ type: z.literal("ping") }).strict(
 // A minimal password policy: long enough to resist brute force, short enough
 // not to frustrate users.  Complexity rules are deliberately omitted; length
 // is the strongest single factor.
-const password = z.string().min(8, "Password must be at least 8 characters").max(72);
-// 72 chars is bcrypt's effective maximum; anything longer is silently truncated
+const password = z
+  .string()
+  .min(8, "Password must be at least 8 characters")
+  .max(72, "Password must be at most 72 characters")
+  .refine((val) => Buffer.byteLength(val, "utf8") <= 72, {
+    message: "Password cannot exceed 72 bytes",
+  });
+// 72 bytes is bcrypt's effective maximum; anything longer is silently truncated
 // by the algorithm, which could confuse users who change only the tail.
 
 export const registerBody = z

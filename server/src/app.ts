@@ -3,6 +3,7 @@ import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import mongoose from "mongoose";
+import { config } from "./config.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { authRouter } from "./routes/auth.js";
 import { boardRouter } from "./routes/board.js";
@@ -13,14 +14,17 @@ import { columnsRouter } from "./routes/columns.js";
 interface AppOptions {
   // Comma-separated list of origins the browser client may call from.
   clientOrigin: string;
+  // Number of reverse proxy hops to trust (Render = 1, Vercel rewrite -> Render = 2).
+  trustProxyHops?: number;
 }
 
 // The Express app lives apart from index.ts (which starts the HTTP server and
 // the database connection) so it can be imported without side effects, for
 // example by tests later.
-export function createApp({ clientOrigin }: AppOptions): Express {
+export function createApp({ clientOrigin, trustProxyHops = config.TRUST_PROXY_HOPS }: AppOptions): Express {
   const app = express();
 
+  app.set("trust proxy", trustProxyHops);
   app.use(helmet());
   app.use(
     cors({

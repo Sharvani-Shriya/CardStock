@@ -18,6 +18,7 @@ export interface AccessTokenPayload {
 // in; anything else (roles, permissions) belongs in a future token version.
 export function signAccessToken(payload: AccessTokenPayload): string {
   return jwt.sign(payload, config.JWT_ACCESS_SECRET, {
+    algorithm: "HS256",
     expiresIn: ACCESS_TOKEN_TTL_SECONDS,
   });
 }
@@ -25,7 +26,9 @@ export function signAccessToken(payload: AccessTokenPayload): string {
 // Verifies a JWT and returns its payload, or throws if the token is invalid or
 // expired.  Callers should catch the error and return 401.
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  const decoded = jwt.verify(token, config.JWT_ACCESS_SECRET);
+  const decoded = jwt.verify(token, config.JWT_ACCESS_SECRET, {
+    algorithms: ["HS256"],
+  });
   if (
     typeof decoded !== "object" ||
     decoded === null ||
