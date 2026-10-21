@@ -73,3 +73,9 @@ export const loginBody = z
     password,
   })
   .strict();
+
+export const boardIdParams = z.object({ boardId: objectId });
+export const boardAndIdParams = z.object({ boardId: objectId, id: objectId });
+export const createBoardBody = z.object({ title: z.string().trim().min(1, "Title is required").max(100) }).strict();
+export const updateBoardBody = z.object({ title: z.string().trim().min(1, "Title is required").max(100) }).strict();
+export const wsTicketBody = z.object({ boardId: objectId }).strict();

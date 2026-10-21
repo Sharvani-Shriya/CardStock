@@ -1,9 +1,11 @@
 import { vi } from "vitest";
 import { sortByPosition } from "../lib/board";
+import { useAuthStore } from "../store/authStore";
+import { useBoardsStore } from "../store/boardsStore";
 import { useBoardStore } from "../store/boardStore";
 import { useConnectionStore } from "../store/connectionStore";
 import { useToastStore } from "../store/toastStore";
-import type { Card, Column } from "../types";
+import type { Card, Column, User } from "../types";
 
 // ---------------------------------------------------------------------------
 // Fixtures and store helpers
@@ -37,9 +39,18 @@ export function layoutOf(cards: Card[], columnId: string): string[] {
 // The Zustand stores are module-level singletons, so without a reset the state
 // of one test would leak into the next one.
 export function resetStores(): void {
-  useBoardStore.setState({ columns: [], cards: [], status: "loading", errorMessage: null });
+  useBoardStore.setState({ columns: [], cards: [], currentBoardId: null, status: "loading", errorMessage: null });
   useToastStore.setState({ toasts: [] });
   useConnectionStore.setState({ status: "connecting" });
+  useAuthStore.setState({ user: null, accessToken: null, status: "ready" });
+  useBoardsStore.setState({ boards: [], status: "ready", errorMessage: null });
+}
+
+export function setAuthenticatedUser(
+  user: User = { id: "user-1", email: "test@example.com" },
+  accessToken = "test-access-token",
+): void {
+  useAuthStore.setState({ user, accessToken, status: "ready" });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,14 +1,33 @@
 // Shapes sent over the wire. These mirror server/src/types.ts, so change both
 // files together.
 
+export interface User {
+  id: string;
+  email: string;
+}
+
+export interface AuthResponse {
+  user: User;
+  accessToken: string;
+}
+
+export interface BoardSummary {
+  id: string;
+  title: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Column {
   id: string;
+  boardId?: string;
   title: string;
   position: number;
 }
 
 export interface Card {
   id: string;
+  boardId?: string;
   columnId: string;
   title: string;
   description: string;
@@ -16,6 +35,7 @@ export interface Card {
 }
 
 export interface BoardResponse {
+  board?: BoardSummary;
   columns: Column[];
   cards: Card[];
 }

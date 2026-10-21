@@ -14,6 +14,7 @@ import {
   makeColumn,
   mockFetch,
   resetStores,
+  setAuthenticatedUser,
 } from "./test/helpers";
 import type { Deferred } from "./test/helpers";
 import type { BoardResponse } from "./types";
@@ -41,6 +42,12 @@ const board: BoardResponse = {
   ],
 };
 
+const boardApiResponse = {
+  board: { id: "board-1", title: "My Board" },
+  columns: board.columns,
+  cards: board.cards,
+};
+
 // Card titles are <h3> and column titles are <h2>. Finding the column through
 // its heading is more robust than relying on how <section> maps to an ARIA role.
 async function findColumn(title: RegExp): Promise<HTMLElement> {
@@ -61,13 +68,35 @@ async function submitNewCard(user: User, title: string): Promise<HTMLElement> {
 
 beforeEach(() => {
   resetStores();
-  // App opens a WebSocket as soon as it mounts, so a fake must always be in place.
   installFakeWebSocket();
+});
+
+describe("authentication and routing", () => {
+  it("redirects unauthenticated users to the sign in page", async () => {
+    window.history.pushState({}, "", "/boards");
+    mockFetch({
+      "POST /api/auth/refresh": () => jsonResponse(401, { error: { message: "Unauthorized" } }),
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Cardstock" })).toBeInTheDocument();
+    expect(screen.getByText("Sign in to access your boards")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Create one now" })).toHaveAttribute("href", "/register");
+  });
 });
 
 describe("rendering the board", () => {
   it("shows a loading state, then the columns and cards from the API", async () => {
-    mockFetch({ "GET /api/board": () => jsonResponse(200, board) });
+    setAuthenticatedUser();
+    window.history.pushState({}, "", "/boards/board-1");
+
+    mockFetch({
+      "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
+      "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
+      "GET /api/board": () => jsonResponse(200, boardApiResponse),
+    });
 
     render(<App />);
 
@@ -96,10 +125,15 @@ describe("rendering the board", () => {
 
 describe("adding a card", () => {
   it("shows the card immediately, then swaps the temporary id for the server's id", async () => {
+    setAuthenticatedUser();
+    window.history.pushState({}, "", "/boards/board-1");
+
     const user = userEvent.setup();
     const serverAnswer = createDeferred<Response>();
     const calls = mockFetch({
-      "GET /api/board": () => jsonResponse(200, board),
+      "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
+      "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
+      "POST /api/boards/board-1/cards": () => serverAnswer.promise,
       "POST /api/cards": () => serverAnswer.promise,
     });
     render(<App />);
@@ -132,7 +166,9 @@ describe("adding a card", () => {
     expect(within(todoColumn).getAllByRole("heading", { name: "Ship the release" })).toHaveLength(1);
 
     // The temporary id is a client-side detail and must never reach the server.
-    const request = calls.find((call) => call.method === "POST" && call.path === "/api/cards");
+    const request = calls.find(
+      (call) => call.method === "POST" && (call.path === "/api/boards/board-1/cards" || call.path === "/api/cards"),
+    );
     expect(request?.body).toEqual({
       columnId: "col-todo",
       title: "Ship the release",
@@ -156,10 +192,15 @@ describe("adding a card", () => {
   ];
 
   it.each(failures)("rolls back and shows an error toast when $name", async ({ fail, toast }) => {
+    setAuthenticatedUser();
+    window.history.pushState({}, "", "/boards/board-1");
+
     const user = userEvent.setup();
     const serverAnswer = createDeferred<Response>();
     const calls = mockFetch({
-      "GET /api/board": () => jsonResponse(200, board),
+      "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
+      "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
+      "POST /api/boards/board-1/cards": () => serverAnswer.promise,
       "POST /api/cards": () => serverAnswer.promise,
     });
     render(<App />);
@@ -179,33 +220,57 @@ describe("adding a card", () => {
 
     // After a failure the board is quietly reloaded, because restoring a snapshot
     // could also undo a teammate's change that arrived while the request was open.
-    await waitFor(() => expect(countRequests(calls, "GET", "/api/board")).toBe(2));
+    await waitFor(() =>
+      expect(
+        countRequests(calls, "GET", "/api/boards/board-1") + countRequests(calls, "GET", "/api/board"),
+      ).toBe(2),
+    );
   });
 });
 
 describe("live connection", () => {
   it("shows 'Live' and reloads the board once the socket connects", async () => {
-    const calls = mockFetch({ "GET /api/board": () => jsonResponse(200, board) });
+    setAuthenticatedUser();
+    window.history.pushState({}, "", "/boards/board-1");
+
+    const calls = mockFetch({
+      "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
+      "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
+      "GET /api/board": () => jsonResponse(200, boardApiResponse),
+    });
     render(<App />);
     await screen.findAllByRole("heading", { level: 2 });
 
     expect(screen.getByText("Connecting…")).toBeInTheDocument();
+
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0));
     const [socket] = FakeWebSocket.instances;
-    // The server skips the sender of a change by matching this id.
-    expect(socket.url).toMatch(/\?clientId=.+/);
+    expect(socket.url).toMatch(/ticket=ticket-1/);
 
     act(() => socket.simulateOpen());
 
     expect(await screen.findByText("Live")).toBeInTheDocument();
     // Events sent while we were offline are lost, so every connect refetches.
-    await waitFor(() => expect(countRequests(calls, "GET", "/api/board")).toBe(2));
+    await waitFor(() =>
+      expect(
+        countRequests(calls, "GET", "/api/boards/board-1") + countRequests(calls, "GET", "/api/board"),
+      ).toBe(2),
+    );
   });
 
   it("applies an event pushed over the socket without a reload", async () => {
-    mockFetch({ "GET /api/board": () => jsonResponse(200, board) });
+    setAuthenticatedUser();
+    window.history.pushState({}, "", "/boards/board-1");
+
+    mockFetch({
+      "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
+      "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
+      "GET /api/board": () => jsonResponse(200, boardApiResponse),
+    });
     render(<App />);
     const doingColumn = await findColumn(/^Doing/);
 
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0));
     act(() => FakeWebSocket.instances[0].simulateOpen());
     act(() => {
       FakeWebSocket.instances[0].simulateMessage({
@@ -218,10 +283,18 @@ describe("live connection", () => {
   });
 
   it("reconnects after the socket drops and reloads the board again", async () => {
-    const calls = mockFetch({ "GET /api/board": () => jsonResponse(200, board) });
+    setAuthenticatedUser();
+    window.history.pushState({}, "", "/boards/board-1");
+
+    const calls = mockFetch({
+      "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
+      "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
+      "GET /api/board": () => jsonResponse(200, boardApiResponse),
+    });
     render(<App />);
     await screen.findAllByRole("heading", { level: 2 });
 
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0));
     act(() => FakeWebSocket.instances[0].simulateOpen());
     expect(await screen.findByText("Live")).toBeInTheDocument();
 
@@ -234,6 +307,10 @@ describe("live connection", () => {
     act(() => FakeWebSocket.instances[1].simulateOpen());
     expect(await screen.findByText("Live")).toBeInTheDocument();
     // Initial load, first connect, second connect.
-    await waitFor(() => expect(countRequests(calls, "GET", "/api/board")).toBe(3));
+    await waitFor(() =>
+      expect(
+        countRequests(calls, "GET", "/api/boards/board-1") + countRequests(calls, "GET", "/api/board"),
+      ).toBe(3),
+    );
   });
 });

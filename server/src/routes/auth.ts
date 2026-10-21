@@ -19,7 +19,8 @@ import { parseWith } from "../http.js";
 import { requireAuth } from "../middleware/authenticate.js";
 import { RefreshToken } from "../models/RefreshToken.js";
 import { User } from "../models/User.js";
-import { loginBody, registerBody } from "../schemas.js";
+import { issueWsTicket } from "../realtime.js";
+import { loginBody, registerBody, wsTicketBody } from "../schemas.js";
 
 export const authRouter = Router();
 
@@ -221,4 +222,14 @@ authRouter.get("/me", requireAuth, (req, res) => {
   // requireAuth already validated the token and populated req.user.
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   res.json({ user: req.user! });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/ws-ticket — acquire single-use WebSocket ticket for a board
+// ---------------------------------------------------------------------------
+authRouter.post("/ws-ticket", requireAuth, (req, res) => {
+  const body = parseWith(wsTicketBody, req.body);
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const ticket = issueWsTicket(req.user!.id, body.boardId);
+  res.json({ ticket });
 });

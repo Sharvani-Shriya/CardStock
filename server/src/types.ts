@@ -1,8 +1,16 @@
 // Shapes sent over the wire. The client keeps a copy of these in
 // client/src/types.ts, so change both files together.
 
+export interface BoardDto {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ColumnDto {
   id: string;
+  boardId?: string;
   title: string;
   position: number;
 }

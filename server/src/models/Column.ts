@@ -2,9 +2,12 @@ import { Schema, Types, model } from "mongoose";
 
 const columnSchema = new Schema(
   {
-    // Every column belongs to exactly one user.  Queries always filter by
+    // Every column belongs to exactly one user. Queries always filter by
     // userId so one user can never see another's data.
     userId: { type: Types.ObjectId, ref: "User", required: true, index: true },
+
+    // Optional boardId linking the column to a specific board.
+    boardId: { type: Types.ObjectId, ref: "Board", required: false, index: true },
 
     title: { type: String, required: true, trim: true, maxlength: 100 },
     // Columns are ordered by this number. It only needs to sort correctly, so

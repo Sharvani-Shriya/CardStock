@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { authRouter } from "./routes/auth.js";
 import { boardRouter } from "./routes/board.js";
+import { boardsRouter } from "./routes/boards.js";
 import { cardsRouter } from "./routes/cards.js";
 import { columnsRouter } from "./routes/columns.js";
 
@@ -45,6 +46,7 @@ export function createApp({ clientOrigin }: AppOptions): Express {
   });
 
   app.use("/api/auth", authRouter);
+  app.use("/api/boards", boardsRouter);
   app.use("/api/board", boardRouter);
   app.use("/api/columns", columnsRouter);
   app.use("/api/cards", cardsRouter);

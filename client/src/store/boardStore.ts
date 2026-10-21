@@ -19,10 +19,12 @@ interface BoardData {
 }
 
 interface BoardState extends BoardData {
+  currentBoardId: string | null;
   status: LoadStatus;
   errorMessage: string | null;
 
-  loadBoard: (options?: { quiet?: boolean }) => Promise<void>;
+  setBoardId: (boardId: string) => void;
+  loadBoard: (boardId?: string, options?: { quiet?: boolean }) => Promise<void>;
   addColumn: (title: string) => Promise<void>;
   renameColumn: (id: string, title: string) => Promise<void>;
   deleteColumn: (id: string) => Promise<void>;
@@ -33,20 +35,17 @@ interface BoardState extends BoardData {
   applyEvent: (event: ServerEvent) => void;
 }
 
-// Module-level bookkeeping for the sync logic below. These are not React state
-// because nothing on screen depends on them.
-let latestLoadId = 0; // lets us ignore a board response that a newer request has overtaken
+// Module-level bookkeeping for the sync logic below.
+let latestLoadId = 0; // ignores board responses that a newer request has overtaken
 let pendingMutations = 0; // optimistic changes still waiting for the server
-let resyncAfterMutations = false; // a refetch was held back and must run when we are idle
+let resyncAfterMutations = false; // a refetch was held back and must run when idle
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
 export const useBoardStore = create<BoardState>()((set, get) => {
-  // The one place that implements "optimistic update with rollback":
-  // 1. remember the current data, 2. show the change immediately,
-  // 3. ask the server, 4. on failure put the old data back and tell the user.
+  // Optimistic update with automatic rollback and quiet sync on settled state.
   async function optimistic<T>(options: {
     failureMessage: string;
     change: (data: BoardData) => BoardData;
@@ -62,9 +61,6 @@ export const useBoardStore = create<BoardState>()((set, get) => {
       const result = await options.send();
       options.onSuccess?.(result);
     } catch (error) {
-      // Restoring the snapshot would also undo any other change made while this
-      // request was in flight, so we schedule a quiet refetch (below) to bring
-      // the screen back in line with the server.
       set(previous);
       resyncAfterMutations = true;
       useToastStore.getState().push(`${options.failureMessage} ${errorText(error)}`);
@@ -72,28 +68,39 @@ export const useBoardStore = create<BoardState>()((set, get) => {
       pendingMutations -= 1;
       if (pendingMutations === 0 && resyncAfterMutations) {
         resyncAfterMutations = false;
-        void get().loadBoard({ quiet: true });
+        void get().loadBoard(undefined, { quiet: true });
       }
     }
   }
 
   return {
+    currentBoardId: null,
     columns: [],
     cards: [],
     status: "loading",
     errorMessage: null,
 
-    loadBoard: async ({ quiet = false } = {}) => {
+    setBoardId: (boardId: string) => {
+      if (get().currentBoardId !== boardId) {
+        set({ currentBoardId: boardId, columns: [], cards: [], status: "loading" });
+      }
+    },
+
+    loadBoard: async (boardId?: string, { quiet = false } = {}) => {
+      const activeBoardId = boardId ?? get().currentBoardId;
+      if (!activeBoardId) return;
+
+      if (boardId && boardId !== get().currentBoardId) {
+        set({ currentBoardId: boardId, columns: [], cards: [] });
+      }
+
       const requestId = ++latestLoadId;
       if (!quiet) set({ status: "loading", errorMessage: null });
 
       try {
-        const board = await api.fetchBoard();
+        const board = await api.fetchBoard(activeBoardId);
         if (requestId !== latestLoadId) return;
 
-        // Applying a snapshot taken before our pending changes reached the
-        // server would make them flicker back to their old state. Hold it
-        // back; optimistic() refetches as soon as everything has settled.
         if (pendingMutations > 0) {
           resyncAfterMutations = true;
           return;
@@ -102,8 +109,6 @@ export const useBoardStore = create<BoardState>()((set, get) => {
         set({ columns: board.columns, cards: board.cards, status: "ready", errorMessage: null });
       } catch (error) {
         if (requestId !== latestLoadId) return;
-        // A quiet refetch fails silently (the socket keeps retrying), unless
-        // there is nothing on screen yet and the user is waiting on it.
         if (!quiet || get().status === "loading") {
           set({ status: "error", errorMessage: errorText(error) });
         }
@@ -111,6 +116,9 @@ export const useBoardStore = create<BoardState>()((set, get) => {
     },
 
     addColumn: async (title) => {
+      const boardId = get().currentBoardId;
+      if (!boardId) return;
+
       const tempId = makeTempId();
       const position = nextPosition(get().columns);
 
@@ -118,10 +126,9 @@ export const useBoardStore = create<BoardState>()((set, get) => {
         failureMessage: "Couldn't add the column.",
         change: (data) => ({
           ...data,
-          columns: [...data.columns, { id: tempId, title, position }],
+          columns: [...data.columns, { id: tempId, boardId, title, position }],
         }),
-        send: () => api.createColumn(title),
-        // Swap the temporary id for the server's id once we have it.
+        send: () => api.createColumn(boardId, title),
         onSuccess: (created) => {
           set((state) => ({ columns: swapById(state.columns, tempId, created) }));
         },
@@ -129,7 +136,8 @@ export const useBoardStore = create<BoardState>()((set, get) => {
     },
 
     renameColumn: async (id, title) => {
-      if (isTempId(id)) return;
+      const boardId = get().currentBoardId;
+      if (!boardId || isTempId(id)) return;
 
       await optimistic({
         failureMessage: "Couldn't rename the column.",
@@ -137,27 +145,27 @@ export const useBoardStore = create<BoardState>()((set, get) => {
           ...data,
           columns: data.columns.map((column) => (column.id === id ? { ...column, title } : column)),
         }),
-        send: () => api.updateColumn(id, { title }),
+        send: () => api.updateColumn(boardId, id, { title }),
       });
     },
 
     deleteColumn: async (id) => {
-      if (isTempId(id)) return;
+      const boardId = get().currentBoardId;
+      if (!boardId || isTempId(id)) return;
 
       await optimistic({
         failureMessage: "Couldn't delete the column.",
-        // The server deletes the column's cards too, so mirror that here.
         change: (data) => ({
           columns: data.columns.filter((column) => column.id !== id),
           cards: data.cards.filter((card) => card.columnId !== id),
         }),
-        send: () => api.deleteColumn(id),
+        send: () => api.deleteColumn(boardId, id),
       });
     },
 
     addCard: async (columnId, title, description) => {
-      // A card cannot be saved into a column the server has not created yet.
-      if (isTempId(columnId)) return;
+      const boardId = get().currentBoardId;
+      if (!boardId || isTempId(columnId)) return;
 
       const tempId = makeTempId();
       const position = nextPosition(get().cards.filter((card) => card.columnId === columnId));
@@ -166,9 +174,9 @@ export const useBoardStore = create<BoardState>()((set, get) => {
         failureMessage: "Couldn't add the card.",
         change: (data) => ({
           ...data,
-          cards: [...data.cards, { id: tempId, columnId, title, description, position }],
+          cards: [...data.cards, { id: tempId, boardId, columnId, title, description, position }],
         }),
-        send: () => api.createCard({ columnId, title, description }),
+        send: () => api.createCard(boardId, { columnId, title, description }),
         onSuccess: (created) => {
           set((state) => ({ cards: swapById(state.cards, tempId, created) }));
         },
@@ -176,7 +184,8 @@ export const useBoardStore = create<BoardState>()((set, get) => {
     },
 
     editCard: async (id, changes) => {
-      if (isTempId(id)) return;
+      const boardId = get().currentBoardId;
+      if (!boardId || isTempId(id)) return;
 
       await optimistic({
         failureMessage: "Couldn't save the card.",
@@ -184,23 +193,25 @@ export const useBoardStore = create<BoardState>()((set, get) => {
           ...data,
           cards: data.cards.map((card) => (card.id === id ? { ...card, ...changes } : card)),
         }),
-        send: () => api.updateCard(id, changes),
+        send: () => api.updateCard(boardId, id, changes),
       });
     },
 
     deleteCard: async (id) => {
-      if (isTempId(id)) return;
+      const boardId = get().currentBoardId;
+      if (!boardId || isTempId(id)) return;
 
       await optimistic({
         failureMessage: "Couldn't delete the card.",
         change: (data) => ({ ...data, cards: data.cards.filter((card) => card.id !== id) }),
-        send: () => api.deleteCard(id),
+        send: () => api.deleteCard(boardId, id),
       });
     },
 
     moveCard: async (id, columnId, index) => {
+      const boardId = get().currentBoardId;
       const card = get().cards.find((item) => item.id === id);
-      if (!card || isTempId(id)) return;
+      if (!boardId || !card || isTempId(id)) return;
 
       if (isTempId(columnId)) {
         useToastStore.getState().push("That column is still being created. Try again in a moment.");
@@ -213,16 +224,13 @@ export const useBoardStore = create<BoardState>()((set, get) => {
       await optimistic({
         failureMessage: "Couldn't move the card.",
         change: (data) => ({ ...data, cards: moveCardLocally(data.cards, id, columnId, index) }),
-        send: () => api.moveCard(id, { columnId, position: index }),
-        // The server's answer is the source of truth for the affected columns.
+        send: () => api.moveCard(boardId, id, { columnId, position: index }),
         onSuccess: ({ cards }) => {
           set((state) => ({ cards: replaceCardsInColumns(state.cards, affectedColumnIds, cards) }));
         },
       });
     },
 
-    // Applies an event broadcast by the server (a change made by someone else).
-    // The sender never receives its own events, so there is no double-apply.
     applyEvent: (event) => {
       switch (event.type) {
         case "column:created":
