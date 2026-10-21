@@ -1,546 +1,551 @@
-# Real-Time Collaborative Kanban Board
+# Real-Time Collaborative Kanban Board (Cardstock)
 
-A Kanban board (UI name: **Cardstock**) where every change appears in all open browser windows within moments, without a refresh. Changes also feel instant to the person making them, and if the server rejects or cannot be reached, the screen rolls back and says so.
+A modern, production-ready Kanban board (**Cardstock**) featuring secure user authentication, multiple board workspaces, per-user data isolation, and live synchronization across all open browser windows without page reloads. Changes feel instantaneous through optimistic client-side updates, backed by automatic rollback on failure and accessible screen-reader alerts.
 
-**Live demo:**  `https://card-stock-gules.vercel.app/`
+**Live demo:** `https://card-stock-gules.vercel.app/`
+
+---
 
 ## Contents
 
 1. [Overview](#overview)
 2. [Features](#features)
-3. [Tech stack](#tech-stack)
-4. [Folder structure](#folder-structure)
+3. [Tech Stack](#tech-stack)
+4. [Folder Structure](#folder-structure)
 5. [Architecture](#architecture)
-6. [Accessibility](#accessibility)
-7. [Getting started](#getting-started)
-8. [Environment variables](#environment-variables)
-9. [Testing](#testing)
-10. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-11. [Known limitations](#known-limitations)
-12. [Deployment](#deployment)
-13. [Post-deploy checklist](#post-deploy-checklist)
+   - [Overview Diagram](#overview-diagram)
+   - [REST API Reference](#rest-api-reference)
+   - [WebSocket Ticket Handshake & Events](#websocket-ticket-handshake--events)
+   - [Authentication & Token Security Design](#authentication--token-security-design)
+   - [Why Same-Origin via Vercel Rewrite](#why-same-origin-via-vercel-rewrite)
+   - [Optimistic Update & Rollback Flow](#optimistic-update--rollback-flow)
+   - [Reconnection Flow](#reconnection-flow)
+   - [Drag and Drop](#drag-and-drop)
+6. [Accessibility (WCAG 2.2 AA)](#accessibility-wcag-22-aa)
+7. [Getting Started](#getting-started)
+8. [Orphaned Data Migration](#orphaned-data-migration)
+9. [Environment Variables](#environment-variables)
+10. [Testing](#testing)
+11. [Design Decisions and Trade-Offs](#design-decisions-and-trade-offs)
+12. [Known Limitations](#known-limitations)
+13. [Deployment](#deployment)
+    - [1. MongoDB Atlas](#1-mongodb-atlas)
+    - [2. Server on Render](#2-server-on-render)
+    - [3. Client on Vercel](#3-client-on-vercel)
+14. [Post-Deploy Checklist](#post-deploy-checklist)
+
+---
 
 ## Overview
 
-The project has two independent packages:
+The repository is organized into two primary applications with a shared root scripts configuration:
 
-- **`server/`** is a Node.js REST API backed by MongoDB. After every successful change it broadcasts an event over a WebSocket to the other connected clients.
-- **`client/`** is a React single-page app. It keeps the board in a small Zustand store, applies the user's actions optimistically, and applies other people's changes as they arrive over the WebSocket.
+- **`server/`**: A Node.js REST API + WebSocket server backed by MongoDB. Authenticates users, enforces board ownership and authorization, persists data, issues single-use WebSocket tickets, and broadcasts real-time board mutations to connected clients.
+- **`client/`**: A React single-page application built with Vite and Tailwind CSS. Keeps the board state in a Zustand store, holds short-lived JWT access tokens strictly in memory, rotates refresh tokens seamlessly via HttpOnly cookies, applies changes optimistically, and syncs live updates over WebSocket connections.
 
-There is a single shared board: no accounts, no multiple boards.
+---
 
 ## Features
 
-- Columns and cards: add, rename or edit, and delete. Deleting a column also deletes its cards (after a confirmation prompt).
-- Drag and drop cards within a column and between columns, with the mouse, touch, or the keyboard.
-- Screen-reader announcements during a drag that use the real card and column titles.
-- Real-time sync across all open windows through a WebSocket.
-- Optimistic updates for every action, with automatic rollback and an error toast on failure.
-- Temporary ids for new items, replaced by the server's ids once saved.
-- Automatic reconnect with exponential backoff and jitter, and a full board reload after every (re)connect so nothing missed is lost.
-- Connection indicator (Connecting / Live / Reconnecting).
-- Loading and error states, including a "Try again" button when the first load fails.
-- Semantic HTML, visible focus styles, a skip link, `prefers-reduced-motion` support, and a layout that stacks columns on small screens and, on wider ones, places them side by side and wraps them onto new rows, so there is no horizontal scrollbar.
+- **Authentication & Security:**
+  - Email and password registration with case-insensitive normalization and duplicate detection.
+  - Timing-safe login comparisons (constant-time bcrypt verification regardless of whether the email exists) returning identical generic error messages.
+  - Short-lived JWT access tokens (15-minute TTL) stored strictly in-memory in Zustand to mitigate token theft via Cross-Site Scripting (XSS).
+  - Rotating refresh tokens (7-day TTL) delivered in `HttpOnly`, `SameSite=Lax`, `Path=/api/auth` cookies.
+  - Refresh token family revocation: replaying a previously rotated-out token immediately revokes the entire token family.
+  - WebSocket ticket handshake: single-use 60s tickets tied to board ownership; connections without a valid ticket are terminated within 5 seconds.
+  - Rate limiting on auth endpoints (10 requests per 15 minutes) and security headers via Helmet.
+- **Multi-Board Management & Isolation:**
+  - Create, view, rename, and delete multiple boards per user.
+  - Direct routing (`/boards` and `/boards/:boardId`) with client-side SPA route guards.
+  - Strict authorization: User B receives HTTP `404 Not Found` (never `403`) when attempting to access User A's boards, columns, or cards, preventing resource enumeration.
+  - Automatic default board creation when a new user registers.
+- **Columns & Cards:**
+  - Add, inline-rename, and delete columns and cards.
+  - Cascade deletions: deleting a board removes all its columns and cards; deleting a column removes all its cards.
+  - Contiguous integer renumbering (`0..n-1`) and `{ cards }` payload return for wholesale column replacement.
+  - Drag and drop cards within a column and across columns via mouse, touch, or accessible keyboard navigation (Space, Arrow keys, Escape).
+- **Real-Time Collaboration:**
+  - Real-time updates push instantly across all connected windows subscribed to the same board.
+  - Board-scoped WebSocket channels: clients connected to Board A never receive events from Board B.
+  - `X-Client-Id` suppression prevents echoing the sender's own changes back to the origin tab.
+  - Automatic reconnection with exponential backoff and jitter, plus quiet full-board re-sync on reconnect.
+- **Accessibility (WCAG 2.2 AA):**
+  - Keyboard navigation for every interaction, visible focus rings, skip links, and ARIA live regions for screen-reader announcements.
+  - `prefers-reduced-motion` support disabling all animations and transitions.
 
-## Tech stack
+---
 
-| Area | Technology |
-| --- | --- |
-| Server | Node.js 20+, Express 5, TypeScript (strict), Mongoose 8 (MongoDB), Zod, `ws` |
-| Client | React 19, TypeScript (strict), Vite 7, Zustand 5, dnd-kit, Tailwind CSS v4 (`@tailwindcss/vite`) |
-| Unit and component tests | Vitest, React Testing Library, jsdom, user-event |
-| End-to-end tests | Playwright (Chromium only) |
-| Database | MongoDB (local or Atlas) |
+## Tech Stack
 
-## Folder structure
+| Layer | Technologies |
+| :--- | :--- |
+| **Server** | Node.js 20+, Express 5, TypeScript (strict), Mongoose 8 (MongoDB), Zod, `ws`, `jsonwebtoken`, `bcryptjs`, `helmet`, `express-rate-limit`, `cookie-parser` |
+| **Client** | React 19, TypeScript (strict), Vite 7, React Router 7, Zustand 5, `@dnd-kit/core`, `@dnd-kit/sortable`, Tailwind CSS v4 (`@tailwindcss/vite`) |
+| **Testing** | Vitest, Supertest, `mongodb-memory-server` (pinned binary `7.0.14`), React Testing Library, jsdom, Playwright (Chromium) |
+| **Database** | MongoDB (local or MongoDB Atlas) |
+
+---
+
+## Folder Structure
 
 ```
 kanban-board/
+├── package.json                  # Root convenience scripts (test, typecheck, build, test:e2e)
 ├── README.md
+├── MANUAL_CHECKLIST.md
 ├── .gitignore
 ├── server/
-│   ├── .env.example
+│   ├── .env.example              # Server environment template with openssl secret instructions
 │   ├── package.json
-│   ├── package-lock.json
 │   ├── tsconfig.json
-│   └── src/
-│       ├── index.ts              # starts MongoDB, the HTTP server and the WebSocket server
-│       ├── app.ts                # Express app (CORS, routes, error handling), no side effects
-│       ├── config.ts             # validates environment variables with Zod
-│       ├── realtime.ts           # WebSocket server, heartbeat, broadcast()
-│       ├── schemas.ts            # Zod schemas for every body, param and WebSocket message
-│       ├── serializers.ts        # Mongoose document -> API shape ({ id, ... })
-│       ├── http.ts               # parseWith() validation helper, X-Client-Id reader
-│       ├── errors.ts             # HttpError
-│       ├── types.ts              # DTOs and the ServerEvent union
-│       ├── middleware/errorHandler.ts
-│       ├── models/{Column.ts, Card.ts}
-│       └── routes/{board.ts, columns.ts, cards.ts}
+│   ├── scripts/
+│   │   └── migrateOrphans.ts     # Migration CLI for pre-auth legacy columns and cards
+│   ├── src/
+│   │   ├── index.ts              # Starts MongoDB, Express HTTP server, and WebSocket server
+│   │   ├── app.ts                # Express app (Helmet, CORS, routes, error handling)
+│   │   ├── config.ts             # Zod environment variable validation
+│   │   ├── realtime.ts           # WebSocket server, ticket verification, heartbeats, broadcast()
+│   │   ├── schemas.ts            # Zod validation schemas for requests and params
+│   │   ├── serializers.ts        # Mongoose document -> API DTO transformers
+│   │   ├── http.ts               # parseWith() validation helper and X-Client-Id extraction
+│   │   ├── errors.ts             # HttpError class
+│   │   ├── types.ts              # Shared DTOs and ServerEvent interfaces
+│   │   ├── auth/
+│   │   │   ├── tokens.ts         # JWT access token signing/verification & refresh token hashing
+│   │   │   ├── password.ts       # bcrypt hashing and timing budget verification
+│   │   │   └── cookie.ts         # HttpOnly refresh cookie helpers
+│   │   ├── middleware/
+│   │   │   ├── authenticate.ts   # requireAuth Bearer token middleware
+│   │   │   └── errorHandler.ts   # Centralized HTTP error handler
+│   │   ├── models/               # User.ts, Board.ts, Column.ts, Card.ts, RefreshToken.ts
+│   │   └── routes/
+│   │       ├── auth.ts           # /api/auth (register, login, refresh, logout, me, ws-ticket)
+│   │       ├── boards.ts         # /api/boards (board CRUD, nested column/card endpoints)
+│   │       └── board.ts          # /api/board (legacy user-scoped default board endpoints)
+│   └── tests/                    # auth.test.ts, boards.test.ts, board.test.ts, websocket.test.ts, migration.test.ts
 └── client/
-    ├── .env.example
+    ├── .env.example              # Client environment template
+    ├── vercel.json               # Vercel configuration with /api rewrite to Render and SPA fallback
     ├── package.json
-    ├── package-lock.json
-    ├── tsconfig.json
-    ├── vite.config.ts            # also holds the Vitest configuration
-    ├── playwright.config.ts
+    ├── vite.config.ts            # Vite 7 + Vitest configuration
+    ├── playwright.config.ts      # Playwright test configuration with webServer orchestration
     ├── index.html
-    ├── e2e/
-    │   ├── realtime.spec.ts      # two windows: create, move, rollback
-    │   ├── keyboard.spec.ts      # keyboard drag and drop, focus handling
-    │   ├── layout.spec.ts        # columns wrap into rows, no sideways scrollbar
-    │   └── support/{env.ts, api.ts, fixtures.ts, board.ts}
+    ├── e2e/                      # Playwright test specs
+    │   ├── auth.spec.ts          # UI register/login, board isolation, logout socket termination
+    │   ├── realtime.spec.ts      # Multi-window live sync, card moves, offline rollback
+    │   ├── keyboard.spec.ts      # Keyboard drag-and-drop, focus retention, Escape cancel
+    │   ├── layout.spec.ts        # Responsive wrapping, no horizontal scroll
+    │   └── support/              # env.ts, api.ts (scoped helpers), fixtures.ts, board.ts
     └── src/
         ├── main.tsx
-        ├── App.tsx               # loading / error / board states, opens the socket
-        ├── App.test.tsx
-        ├── index.css             # Tailwind import and design tokens
-        ├── config.ts             # API/WS URLs and this tab's CLIENT_ID
-        ├── types.ts              # mirrors server/src/types.ts
-        ├── components/           # Board, ColumnView, CardItem, AddItemForm, ConnectionStatus, Toasts
+        ├── App.tsx               # App router, session restoration, toast container
+        ├── config.ts             # API/WS URLs and random tab CLIENT_ID
+        ├── types.ts              # Client types mirroring server DTOs
+        ├── components/           # Board, ColumnView, CardItem, ProtectedRoute, Header, Toasts, styles
         ├── hooks/                # useBoardSocket.ts, usePrefersReducedMotion.ts
-        ├── lib/                  # api.ts, board.ts (pure helpers), events.ts, focus.ts, ids.ts (+ board.test.ts)
-        ├── store/                # boardStore.ts, connectionStore.ts, toastStore.ts (+ boardStore.test.ts)
-        └── test/                 # setup.ts, helpers.ts (fake fetch and WebSocket)
+        ├── pages/                # AuthPage.tsx, BoardsPage.tsx, BoardPage.tsx
+        ├── store/                # authStore.ts, boardsStore.ts, boardStore.ts, connectionStore.ts, toastStore.ts
+        └── lib/                  # api.ts (with 401 retry deduplication), board.ts, events.ts, ids.ts, focus.ts
 ```
 
-`server/src/types.ts` and `client/src/types.ts` describe the same wire format. Change them together.
+---
 
 ## Architecture
 
-### Overview diagram
+### Overview Diagram
 
 ```mermaid
 flowchart LR
-  subgraph clientA["Browser A"]
-    uiA["React UI"] <--> storeA["Zustand store"]
+  subgraph clientA["Browser A (Client ID: A)"]
+    uiA["React UI"] <--> storeA["Zustand Store (In-Memory JWT)"]
   end
-  subgraph clientB["Browser B"]
-    uiB["React UI"] <--> storeB["Zustand store"]
+  subgraph clientB["Browser B (Client ID: B)"]
+    uiB["React UI"] <--> storeB["Zustand Store (In-Memory JWT)"]
   end
-  subgraph srv["Node server"]
-    rest["Express REST routes"]
-    ws["ws server at /ws"]
-    rest -->|"broadcast(event, senderId)"| ws
+  subgraph srv["Node.js Server"]
+    authMid["requireAuth Middleware"]
+    rest["Express Routes (/api/boards)"]
+    ws["ws Server (/ws)"]
+    authMid --> rest
+    rest -->|"broadcast(event, senderId, boardId)"| ws
   end
   db[("MongoDB")]
 
-  storeA -->|"REST + X-Client-Id header"| rest
+  storeA -->|"REST: Bearer JWT + X-Client-Id"| authMid
   rest --> db
-  ws -->|"event to every other client"| storeB
+  ws -->|"event to board subscribers"| storeB
   ws -.->|"skipped: same client id"| storeA
 ```
 
-Writes go through REST. The WebSocket is used only to push events from the server to clients (the server does not accept board changes over it).
+Writes proceed via REST. The WebSocket is dedicated to real-time broadcast notifications from the server to subscribed clients.
 
-### REST API
+---
 
-Every request and response is JSON. Errors always look like `{ "error": { "message": "...", "details": ... } }`; `details` carries Zod's field errors for validation failures (HTTP 400). Every body and every `:id` parameter is validated with Zod, and unknown body keys are rejected.
+### REST API Reference
 
-| Method and path | Body | Result |
-| --- | --- | --- |
-| `GET /api/health` | none | `{ status, database }` |
-| `GET /api/board` | none | `{ columns: [{ id, title, position }], cards: [{ id, columnId, title, description, position }] }` |
-| `POST /api/columns` | `{ title }` (1-100 chars) | `201` with the column |
-| `PATCH /api/columns/:id` | `{ title }` | the updated column |
-| `DELETE /api/columns/:id` | none | `204`; also deletes the column's cards |
-| `POST /api/cards` | `{ columnId, title, description? }` (title 1-200, description up to 2000) | `201` with the card |
-| `PATCH /api/cards/:id` | `{ title?, description? }` (at least one) | the updated card |
-| `PATCH /api/cards/:id/move` | `{ columnId, position }` | `{ cards }`: all cards of the affected columns |
-| `DELETE /api/cards/:id` | none | `204` |
+All requests and responses use JSON. Unauthenticated board requests return `401 Unauthorized`. Unauthorized requests targeting another user's board return `404 Not Found` (never `403 Forbidden`) to prevent resource enumeration.
 
-For the move endpoint, `position` is the **index in the target column**. The server clamps it to the valid range and renumbers the positions of the target column (and the source column, if different) to exactly `0..n-1`.
+#### Authentication Endpoints (`/api/auth`)
 
-### Real-time events
+| Method and Path | Body | Auth Required | Description |
+| :--- | :--- | :---: | :--- |
+| `POST /api/auth/register` | `{ email, password }` | No | Creates an account, generates default board, returns `{ user, accessToken }` and sets HttpOnly refresh cookie. |
+| `POST /api/auth/login` | `{ email, password }` | No | Verifies credentials (timing-safe), returns `{ user, accessToken }` and sets HttpOnly refresh cookie. |
+| `POST /api/auth/refresh` | None (reads cookie) | No | Validates Origin header, rotates refresh token, returns `{ user, accessToken }` and sets new cookie. |
+| `POST /api/auth/logout` | None (reads cookie) | No | Validates Origin header, deletes current refresh token, and clears cookie (`204`). |
+| `POST /api/auth/logout-all` | None | Bearer Token | Revokes all refresh token sessions across all devices for this user (`204`). |
+| `GET /api/auth/me` | None | Bearer Token | Returns current authenticated `{ user: { id, email } }`. |
+| `POST /api/auth/ws-ticket` | `{ boardId }` | Bearer Token | Verifies board ownership and generates a single-use 60s ticket `{ ticket }` for `/ws`. |
 
-After each successful REST change the server broadcasts one event to every connected client except the sender.
+#### Board Endpoints (`/api/boards`)
 
-| Event | Payload |
-| --- | --- |
-| `column:created`, `column:updated` | `{ column }` |
-| `column:deleted` | `{ id }` (receivers also drop that column's cards locally) |
-| `card:created`, `card:updated` | `{ card }` |
-| `card:deleted` | `{ id, columnId }` |
-| `cards:reordered` | `{ columnIds, cards }`: every card of the affected columns |
+| Method and Path | Body | Description |
+| :--- | :--- | :--- |
+| `GET /api/boards` | None | Lists all boards owned by the user `[{ id, title, createdAt }]` (auto-creates default if empty). |
+| `POST /api/boards` | `{ title }` | Creates a new board (`201`). |
+| `GET /api/boards/:boardId` | None | Retrieves board summary, columns, and cards `{ id, title, columns, cards }`. |
+| `PATCH /api/boards/:boardId` | `{ title }` | Renames the board. |
+| `DELETE /api/boards/:boardId` | None | Deletes board and cascades deletion to all associated columns and cards (`204`). |
 
-`cards:reordered` lists the affected column ids because a column that just lost its last card has no cards in the payload, so receivers need the ids to know which columns to replace wholesale.
+#### Board-Scoped Columns & Cards (`/api/boards/:boardId/...`)
 
-The WebSocket endpoint is `/ws`. The server pings every client every 30 seconds and terminates sockets that did not answer the previous ping, so half-open connections do not pile up. Any message a client sends is validated with Zod; the only accepted message is `{ "type": "ping" }`, answered with `{ "type": "pong" }`. (The current client relies on the browser's automatic answer to protocol pings and does not send this message.)
+| Method and Path | Body | Description |
+| :--- | :--- | :--- |
+| `POST /api/boards/:boardId/columns` | `{ title }` | Creates a column in the board (`201`). |
+| `PATCH /api/boards/:boardId/columns/:id` | `{ title }` | Renames the column. |
+| `DELETE /api/boards/:boardId/columns/:id` | None | Deletes column and cascades deletion to its cards (`204`). |
+| `POST /api/boards/:boardId/cards` | `{ columnId, title, description? }` | Creates a card in the specified column (`201`). |
+| `PATCH /api/boards/:boardId/cards/:id` | `{ title?, description? }` | Updates card title or description. |
+| `PATCH /api/boards/:boardId/cards/:id/move` | `{ columnId, position }` | Moves card to index `position` in `columnId`. Returns `{ cards }` (all cards in affected columns, contiguous `0..n-1`). |
+| `DELETE /api/boards/:boardId/cards/:id` | None | Deletes the card (`204`). |
 
-### How X-Client-Id prevents echo
+---
 
-Each browser tab generates a random `CLIENT_ID` once per page load (`client/src/config.ts`). It is sent as the `X-Client-Id` header on every REST request and as `?clientId=` when the WebSocket connects. When a REST handler calls `broadcast(event, senderClientId)`, the server skips every socket whose client id equals the sender's.
+### WebSocket Ticket Handshake & Events
 
-The sender already applied its change optimistically, so receiving the same change again would be redundant and could briefly flicker the UI. Two tabs in the same browser have different ids, so they sync with each other. If the header is missing (for example when using `curl`), the event goes to everyone.
+1. **Ticket Acquisition:** Before opening a WebSocket connection, the client requests a ticket via `POST /api/auth/ws-ticket` using its in-memory access token. The server validates that the user owns `boardId` and returns a cryptographically random, single-use ticket.
+2. **Connection:** The client connects to `/ws?ticket=<ticket>&boardId=<boardId>&clientId=<clientId>`.
+3. **Validation & Timeout:** The server verifies the ticket in memory. If valid, the ticket is immediately consumed (preventing replay attacks), the socket is bound to `boardId`, and connection is marked active. Unauthenticated or ticketless connections are terminated after **5 seconds**.
+4. **Board Isolation:** Broadcasts generated by mutations on Board A are distributed exclusively to sockets connected to Board A. Sockets connected to Board B never receive them.
+5. **Client Echo Suppression:** If `X-Client-Id` on the REST call matches the socket's `clientId`, the server suppresses echoing the event back to the origin tab.
 
 ```mermaid
 sequenceDiagram
-  participant A as Browser A
-  participant S as Server
-  participant DB as MongoDB
-  participant B as Browser B
+  participant UI as Browser Tab (Client ID: A)
+  participant API as REST API
+  participant WS as WebSocket Server
+  participant ClientB as Browser Tab (Client ID: B)
 
-  A->>A: Show the new card at once with a temporary id
-  A->>S: POST /api/cards with X-Client-Id of A
-  S->>DB: Insert the card
-  DB-->>S: Saved card with its real id
-  S-->>A: 201 with the card
-  A->>A: Swap the temporary id for the real id
-  S-->>B: WebSocket event card:created
-  Note over S,A: A is skipped because its client id matches the sender
-  B->>B: Apply the event to the store
+  UI->>API: POST /api/auth/ws-ticket { boardId: "b1" } (Bearer JWT)
+  API-->>UI: 200 { ticket: "ticket-xyz" }
+  UI->>WS: Connect /ws?ticket=ticket-xyz&boardId=b1&clientId=A
+  WS->>WS: Validate & consume ticket, assign to board b1
+  WS-->>UI: Connected (Status: "Live")
+  UI->>API: POST /api/boards/b1/cards (with X-Client-Id: A)
+  API-->>UI: 201 Created { id: "c1", ... }
+  API->>WS: broadcast(card:created, senderId: A, boardId: b1)
+  Note over WS,UI: Tab A is skipped because client ID matches sender
+  WS-->>ClientB: card:created event delivered to board b1 subscribers
 ```
 
-### Optimistic update and rollback
+---
 
-All six mutations (add, rename or edit, delete, for columns and cards, plus move) go through one function in `client/src/store/boardStore.ts`. The steps are:
+### Authentication & Token Security Design
 
-1. Save a snapshot of the current columns and cards.
-2. Apply the change to the store, so the screen updates immediately. New items get a temporary id (prefix `tmp-`).
-3. Send the API request.
-4. On success, apply the server's answer. For a create, swap the temporary id for the server's id; for a move, replace the affected columns with the server's list.
-5. On failure, restore the snapshot and show an error toast (an `alert` live region).
-6. When no other change is still in flight and a refetch was requested, quietly reload `GET /api/board`.
+- **Access Token in Memory:** Access tokens are short-lived (15 minutes) signed JWTs. They are held strictly in JavaScript memory inside the Zustand `authStore` and are **never** stored in `localStorage`, `sessionStorage`, or `IndexedDB`. This ensures that malicious scripts (XSS) cannot steal persistent credentials from browser storage.
+- **Rotating Refresh Token Cookie:** Refresh tokens are 48-byte cryptographically random strings. Only the SHA-256 hash is stored in MongoDB. The token is sent to the client as an `HttpOnly`, `SameSite=Lax`, `Path=/api/auth` cookie.
+- **Token Rotation & Family Revocation:** Each call to `POST /api/auth/refresh` issues a new access token, generates a new refresh token, updates the cookie, and marks the old refresh token as used (`isUsed: true`). If an attacker attempts to replay a previously rotated token, the server immediately revokes all refresh tokens sharing that `familyId`, terminating all sessions for that device family.
+- **In-Flight Refresh Coalescing:** The client library (`client/src/lib/api.ts`) wraps `refreshToken()` in a deduplicated in-flight promise (`inFlightAuthRefresh`). When parallel requests encounter 401s or when React Strict Mode mounts components concurrently, all callers share a single `POST /api/auth/refresh` request, eliminating race conditions.
 
-```mermaid
-flowchart TD
-  start(["User action"]) --> snap["Save a snapshot of columns and cards"]
-  snap --> apply["Apply the change to the store, UI updates at once"]
-  apply --> call["Send the API request"]
-  call -->|"success"| ok["Apply the server's answer, for example swap the temporary id"]
-  call -->|"failure"| rb["Restore the snapshot and show an error toast"]
-  rb --> flag["Request a refetch"]
-  ok --> idle{"Other changes still in flight?"}
-  flag --> idle
-  idle -->|"no, and a refetch is waiting"| refetch["Quiet refetch of GET /api/board"]
-  idle -->|"otherwise"| done(["Done"])
-  refetch --> done
+---
+
+### Why Same-Origin via Vercel Rewrite
+
+Modern browsers enforce strict third-party cookie restrictions (e.g. Chrome Privacy Sandbox, Safari ITP). When a frontend on Vercel (`https://card-stock.vercel.app`) calls a backend on Render (`https://card-stock.onrender.com`) directly, cross-origin requests treat cookies as third-party.
+
+To solve this cleanly, [client/vercel.json](file:///c:/Users/DELL/OneDrive/Desktop/kanban-boardF/kanban-board/client/vercel.json) configures reverse proxy rewrites:
+
+```json
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://<your-render-service>.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
 ```
 
-Details that keep this safe:
+**Benefits:**
+1. **First-Party Cookies:** Requests to `/api/auth/...` are sent to the same origin (`https://card-stock.vercel.app/api/...`), so `SameSite=Lax` cookies are treated as first-party and are never blocked.
+2. **No CORS Preflight Overhead:** Normal REST API calls require no CORS preflights.
+3. **SPA Routing:** `/(.*)` rewrites all non-API paths to `/index.html`, allowing direct navigation and reloads on `/boards`, `/boards/:boardId`, `/login`, and `/register`.
 
-- Items with a temporary id cannot be edited, deleted or dragged until the server has saved them (the card shows "Saving…"). A card also cannot be added to a column that is still unsaved.
-- A board response that was requested before a newer request is ignored.
-- A refetch that arrives while a change is still in flight is held back and re-run once everything has settled. Otherwise it could briefly show the old state of the pending change.
-- Applying a `cards:reordered` event or a move response keeps cards that still have a temporary id, because the server cannot know about them yet.
+---
 
-### Reconnect flow
+### Optimistic Update & Rollback Flow
 
-`client/src/hooks/useBoardSocket.ts` keeps one WebSocket open while the app is mounted.
+1. Capture a snapshot of the current columns and cards.
+2. Apply the change immediately to the Zustand store (temporary IDs prefixed with `tmp-`).
+3. Dispatch the API request with the `Authorization: Bearer <token>` and `X-Client-Id` headers.
+4. On success: swap temporary IDs for server IDs, or update positions from the response `{ cards }`.
+5. On failure: restore the snapshot, show an error alert toast, and trigger a quiet refetch of the board.
 
-```mermaid
-stateDiagram-v2
-  [*] --> Connecting
-  Connecting --> Connected: socket opens
-  Connected --> Reconnecting: socket closes
-  Reconnecting --> Connected: socket opens
-  Reconnecting --> Reconnecting: attempt fails, wait longer
-```
+---
 
-- **Backoff:** the wait before attempt *n* (starting at 0) is `min(15 s, 500 ms × 2ⁿ)`, then randomised to between half and the full value ("jitter"). So the waits are about 0.25-0.5 s, 0.5-1 s, 1-2 s, 2-4 s, 4-8 s, 7.5-15 s, and then stay at 7.5-15 s. Jitter prevents every browser from retrying at the same instant after a server restart.
-- **Refetch on every (re)connect:** events broadcast while a client was offline are gone for good, so each time the socket opens the client reloads the whole board. This also happens on the very first connect.
-- A successful connect resets the attempt counter. Closing the app (unmounting) stops further retries.
+### Reconnection Flow
 
-### Drag and drop
+`client/src/hooks/useBoardSocket.ts` maintains a live socket for the active board:
+- **Exponential Backoff with Jitter:** Retries after disconnect with randomized delays (`0.5s` up to `15s`).
+- **Fresh Tickets on Reconnect:** Every reconnection attempts to acquire a new single-use ticket via `POST /api/auth/ws-ticket`.
+- **Quiet Re-Sync:** When the socket opens, the client refetches the active board silently to recover any events broadcast during the disconnect.
 
-The board uses dnd-kit with a pointer sensor (a 5 px movement threshold, so a plain click never starts a drag) and a keyboard sensor. The drag handle is the only drag activator, so the Edit and Delete buttons keep working normally.
+---
 
-With the keyboard, focus a card's drag handle and press Space to pick it up. **Up and Down** reorder it inside its column, **Left and Right** carry it to the previous or next column in display order, including an empty one and the first column of the next row when columns wrap, Space drops it and Escape cancels. This is a custom coordinate getter in `Board.tsx` (`createKeyboardCoordinates`). Up and Down reuse dnd-kit's `sortableKeyboardCoordinates` limited to the current column, but Left and Right go by column order instead of screen position, because a position-based search finds nothing "to the right" of the last column in a row. After a keyboard drop or cancel, focus is put back on the card's handle, since its element is rebuilt in its new place.
+### Drag and Drop
 
-While a card is being dragged, it is moved between lists in a **local working copy** only. The store and the server are touched exactly once, when the card is dropped, so crossing three columns sends one request, not three.
+- Powered by `@dnd-kit/core` and `@dnd-kit/sortable`.
+- Pointer sensor uses a 5px activation threshold so clicks on edit/delete buttons do not trigger drags.
+- Keyboard sensor (`Space` to pick up, `Arrow` keys to move across columns and rows, `Space` to drop, `Escape` to cancel).
+- Focus is restored to the drag handle after reordering.
 
-## Accessibility
+---
 
-The UI was audited against WCAG 2.2 AA. What is in place:
+## Accessibility (WCAG 2.2 AA)
 
-- **Keyboard:** every action (add, edit, rename, delete, move) works without a mouse. Opening or closing a form moves focus into it and back to the button that opened it. After deleting a card or column, focus moves to a neighbour instead of dropping to the page body. A skip link jumps to the board.
-- **Names and labels:** every field has a visible or spoken label, forms are grouped with a legend that names the card or column, and buttons that repeat in every column say which one they belong to (for example "Add card to To do").
-- **Live announcements:** drag and drop announces the real card and column titles. Errors appear in an `alert` toast that stays while the pointer or focus is on it. The connection badge and the loading placeholder are `status` regions.
-- **Structure:** one `h1`, column titles as `h2`, card titles as `h3`, a `header`, a `main`, and one labelled region per column.
-- **Contrast and focus:** text meets 4.5:1 and the edge of text fields meets 3:1. Every control shows a 3 px focus ring.
-- **Motion:** `prefers-reduced-motion` switches off CSS transitions and animations, and the drag drop-animation, which runs in JavaScript.
+- **Keyboard Navigation:** Full operation without a mouse across board list, board canvas, modals, and auth forms.
+- **Skip Links:** "Skip to main content", "Skip to board", and "Skip to form" links for assistive technology users.
+- **ARIA Live Regions:** Error announcements (`role="alert"`), connection status updates (`role="status"`), and screen-reader drag announcements.
+- **Form Controls:** Validated inputs with `aria-invalid`, `aria-describedby` pointing to error descriptions, and accessible password reveal toggles.
+- **Motion:** `prefers-reduced-motion` suppresses animations and transitions.
 
-Not done: moving a card still requires a drag gesture (with the mouse or the keyboard). A click-only alternative such as a "Move to column" menu would satisfy WCAG 2.5.7 and is listed under known limitations.
+---
 
-## Getting started
+## Getting Started
 
 ### Prerequisites
 
-- Node.js 20.19 or newer (Vite 7 requires it).
-- A MongoDB instance: a local one, or a free MongoDB Atlas cluster. To run one locally with Docker: `docker run -d --name kanban-mongo -p 27017:27017 mongo:7`.
+- Node.js 20.19+ (Vite 7 compatible).
+- MongoDB instance (local or MongoDB Atlas).
 
-### 1. Server
+### 1. Root Installation
+
+Install dependencies from the repository root:
+
+```bash
+# In kanban-board/
+npm run test           # Runs all server and client unit tests
+npm run typecheck      # Runs TypeScript checks across both packages
+npm run build          # Builds production bundles for server and client
+```
+
+### 2. Server Setup
 
 ```bash
 cd server
-cp .env.example .env      # then edit MONGODB_URI if needed
+cp .env.example .env
 npm install
-npm run dev               # REST on http://localhost:4000/api, WebSocket on ws://localhost:4000/ws
+npm run dev            # REST: http://localhost:4000/api, WS: ws://localhost:4000/ws
 ```
 
-### 2. Client (in a second terminal)
+### 3. Client Setup
 
 ```bash
 cd client
 cp .env.example .env
 npm install
-npm run dev               # http://localhost:5173
+npm run dev            # http://localhost:5173
 ```
 
-Open the client in two browser windows to see the real-time sync.
+---
 
-### Scripts
+## Orphaned Data Migration
 
-| Package | Script | What it does |
-| --- | --- | --- |
-| server | `npm run dev` | Runs the server with `tsx` and restarts it on file changes |
-| server | `npm run build` | Compiles TypeScript to `dist/` |
-| server | `npm start` | Runs the compiled server (`node dist/index.js`) |
-| server | `npm run typecheck` | Type-checks without emitting files |
-| server | `npm test` | Runs server integration tests (auth and board routes) |
-| server | `npm run migrate:orphans` | See [Orphaned data migration](#orphaned-data-migration) below |
-| client | `npm run dev` | Starts the Vite dev server |
-| client | `npm run build` | Type-checks, then builds to `dist/` |
-| client | `npm run preview` | Serves the production build locally |
-| client | `npm run typecheck` | Type-checks without emitting files |
-| client | `npm test` / `npm run test:watch` | Unit and component tests (once / in watch mode) |
-| client | `npm run test:e2e` | Playwright end-to-end tests |
-
-### Orphaned data migration
-
-If your database has columns or cards that were created **before authentication was added** (i.e. they have no `userId`), you need to run the migration script once. Without it, those documents are invisible to all users.
-
-First, check how many orphans exist (read-only):
+If your database contains columns or cards created **before authentication was introduced** (documents with no `userId`), run the migration script:
 
 ```bash
 cd server
+
+# 1. Dry run (read-only inspection)
 npm run migrate:orphans
-```
 
-Then, either assign them to an existing user:
-
-```bash
+# 2. Assign all orphaned items to a registered user
 npm run migrate:orphans -- --assign-to alice@example.com
-```
 
-Or delete them permanently:
-
-```bash
+# 3. Or delete all orphaned items permanently
 npm run migrate:orphans -- --delete
 ```
 
-`--assign-to` and `--delete` are mutually exclusive. The script reads `MONGODB_URI` from `server/.env`.
+The script is safe, idempotent, and requires `MONGODB_URI` in `server/.env`.
 
-## Environment variables
+---
+
+## Environment Variables
 
 ### Server (`server/.env`)
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `PORT` | no | `4000` | Port for HTTP and WebSocket |
-| `MONGODB_URI` | **yes** | none | MongoDB connection string. Include the database name, for example `.../kanban` |
-| `CLIENT_ORIGIN` | no | `http://localhost:5173` | Origin(s) allowed by CORS. Comma-separated for several. Must match exactly: scheme, host and port, with **no trailing slash** |
-| `JWT_ACCESS_SECRET` | **yes** | none | Secret for signing access tokens. At least 32 characters. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `JWT_REFRESH_SECRET` | **yes** | none | Secret for signing refresh tokens. At least 32 characters. Must differ from `JWT_ACCESS_SECRET` |
-| `COOKIE_SECURE` | no | `false` | Set to `true` whenever the server is behind HTTPS (always in production). Controls the `Secure` flag on the refresh cookie |
+Generate secrets using `openssl rand -base64 48`:
 
-The server validates all variables at startup and exits with a clear message if any are invalid. In production, both JWT secrets are required and must be at least 32 characters.
+| Variable | Required | Default | Description |
+| :--- | :---: | :--- | :--- |
+| `PORT` | No | `4000` | Port for HTTP and WebSocket servers (Render assigns this automatically). |
+| `NODE_ENV` | No | `development` | Environment mode: `development`, `production`, or `test`. |
+| `MONGODB_URI` | **Yes** | None | MongoDB connection string including database name. |
+| `CLIENT_ORIGIN` | No | `http://localhost:5173` | Allowed CORS origins (comma-separated, no trailing slash). |
+| `JWT_ACCESS_SECRET` | **Yes** | None | Secret for signing 15m JWT access tokens (>= 32 chars). Generate: `openssl rand -base64 48`. |
+| `JWT_REFRESH_SECRET`| **Yes** | None | Secret for refresh token hashing (>= 32 chars, different from access secret). Generate: `openssl rand -base64 48`. |
+| `COOKIE_SECURE` | No | `false` | Set to `true` behind HTTPS/TLS (always `true` in production). |
 
 ### Client (`client/.env`)
 
 | Variable | Default | Description |
-| --- | --- | --- |
-| `VITE_API_URL` | `http://localhost:4000` | Base URL of the API. No `/api` suffix; a trailing slash is removed automatically |
-| `VITE_WS_URL` | `ws://localhost:4000/ws` | Full WebSocket URL including `/ws`. Use `wss://` when the site is served over HTTPS |
+| :--- | :--- | :--- |
+| `VITE_API_URL` | `http://localhost:4000` | Base URL of the REST API (leave unset or empty string if using Vercel rewrites). |
+| `VITE_WS_URL` | `ws://localhost:4000/ws` | Full WebSocket URL. Use `wss://` in production over HTTPS. |
 
-Vite reads `VITE_*` variables **at build time** and bakes them into the bundle, so changing them on a hosting platform requires a new build.
+---
 
-### Tests
+## Testing
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `E2E_MONGODB_URI` | `mongodb://127.0.0.1:27017/kanban_e2e` | Database used by the Playwright tests. Read from the shell, not from `.env` files. The database name must contain `e2e` |
+All tests are verified and automated:
 
-### Server integration tests (Vitest + Supertest)
+### Run Everything from Root
+
+```bash
+npm run test         # Runs server Vitest (59 tests) + client Vitest (55 tests)
+npm run typecheck    # Full TypeScript typecheck (server + client)
+npm run build        # Production builds (server + client)
+npm run test:e2e     # Runs Playwright E2E suite (12 tests)
+```
+
+### Server Integration Tests (59 tests)
 
 ```bash
 cd server
 npm test
 ```
+*Tests use an in-memory database (`mongodb-memory-server` pinned to `7.0.14`) and cover auth flows, token rotation, family revocation, origin checks, rate limiting, board CRUD, 404 user isolation, cascade deletions, WebSocket ticket timeouts, and migrations.*
 
-These spin up an in-memory MongoDB instance with `mongodb-memory-server` (no real database needed) and drive the Express app through `supertest`. They cover:
-
-- Registration, login, refresh (with token rotation), logout, logout-all, and the `/me` endpoint.
-- Generic error messages that do not reveal whether an email is registered.
-- Per-user data isolation: user A cannot see or modify user B's columns or cards.
-- Auth gating: every board endpoint returns 401 without a valid Bearer token.
-
-The mongod binary version is pinned in `tests/helpers/db.ts` via the `MONGOMS_VERSION` environment variable. CI can cache the binary at `~/.cache/mongodb-binaries` to avoid re-downloading it on every run.
-
-### Unit and component tests (Vitest)
+### Client Unit Tests (55 tests)
 
 ```bash
 cd client
 npm test
 ```
+*Tests run in jsdom with mocked fetch and WebSocket. Covers `authStore` actions, `restoreSession`, `ProtectedRoute` redirection, `api.ts` deduplicated 401 refresh/retry, `AuthPage` form validations and ARIA alerts, and `BoardsPage` CRUD.*
 
-These run in jsdom with `fetch` and `WebSocket` replaced by fakes, so **no server or database is needed**. They cover:
-
-- Rendering the board from API data, including the loading state.
-- Adding a card: the optimistic card appears immediately and the temporary id is replaced by the server's id.
-- Rollback with an error toast when the API fails or cannot be reached.
-- The store's `applyEvent` for `card:created`, `card:deleted` and `cards:reordered`.
-- The local move/reorder helper: same column, across columns, and index clamping.
-- The connection badge, refetch on connect, applying events from the socket, and reconnect.
-
-### End-to-end tests (Playwright)
-
-Prerequisites:
-
-- MongoDB running (default `127.0.0.1:27017`).
-- Dependencies installed in both `server/` and `client/`.
-- Chromium installed once: `npx playwright install chromium` (add `--with-deps` on a fresh Linux machine).
-- Ports `4100` and `5174` free.
+### Playwright End-to-End Tests (12 tests)
 
 ```bash
 cd client
 npm run test:e2e
 ```
+*Requires MongoDB running locally. Orchestrates isolated test users, verifies UI registration/login, cross-user board isolation, real-time sync across independent browser windows, logout socket termination, and keyboard drag-and-drop.*
 
-Playwright starts its own server (port 4100) and client (port 5174) using the `webServer` entries in `playwright.config.ts`, and never reuses an already-running server, so your development setup is not involved. The tests use the database `kanban_e2e`, or the one in `E2E_MONGODB_URI`.
+---
 
-> **Warning:** each test starts by deleting every column and card in the test database. The run refuses to start unless the database name contains `e2e`.
+## Design Decisions and Trade-Offs
 
-`realtime.spec.ts` opens two separate browser contexts and checks that a created card and a moved card appear in the other window, and that blocking the API (`page.route` abort) rolls back the optimistic change and shows an error toast. `keyboard.spec.ts` moves cards with the keyboard only: across columns (including an empty one), up and down inside a column, cancelling with Escape, that focus returns to the card's handle, and that the result is saved on the server. `layout.spec.ts` checks that columns wrap onto new rows at several window widths without a horizontal scrollbar, and that Left/Right still reach columns on the next row. On failure, open the report with `npx playwright show-report`.
+- **Access Token in Memory vs LocalStorage:** Keeping tokens in JavaScript memory prevents persistent XSS token theft. Page reloads restore tokens automatically via the secure HttpOnly refresh cookie.
+- **Token Rotation with Family Revocation:** Every token refresh invalidates the previous token. If an invalid or previously used token is received, the server revokes all tokens belonging to that user's session family, neutralizing stolen refresh tokens.
+- **WebSocket Handshake Tickets:** Sockets cannot be authenticated via standard HTTP headers during the initial upgrade request in standard browser APIs. Generating a short-lived, single-use ticket via authenticated REST (`POST /api/auth/ws-ticket`) guarantees that only users with authorized access to a board can connect to its WebSocket channel.
+- **404 Instead of 403 for Unauthorized Boards:** If User B attempts to access User A's board or nested resources, the server responds with `404 Not Found` rather than `403 Forbidden`. This conceals the existence of private boards from unauthorized users.
 
-The server has no automated tests yet.
+---
 
-## Design decisions and trade-offs
+## Known Limitations
 
-### Integer positions vs fractional indexing
+- **Column Reordering:** Column ordering is determined when columns are created; moving columns via drag-and-drop is not currently implemented.
+- **Single Server WebSocket Hub:** Real-time event broadcasting uses an in-memory socket registry. Scaling horizontally across multiple server instances requires a shared publish/subscribe message broker (such as Redis).
+- **Click-Only Drag Alternative:** Reordering cards requires a pointer drag or keyboard navigation. A context-menu click alternative ("Move to column...") would satisfy WCAG 2.5.7.
+- **External Web Fonts:** Outfit and Plus Jakarta Sans are fetched from Google Fonts in `index.html`.
 
-Cards and columns have an integer `position`. The move endpoint takes an index and renumbers the affected columns to `0..n-1`.
-
-- **Why:** it is easy to understand and debug, the "position" the client sends is exactly the index it sees, and the order is always contiguous.
-- **Cost:** a move rewrites the position of every card that shifted, so it is O(n) writes per affected column, and those writes are not atomic.
-- **Alternative:** fractional indexing (a position between its neighbours, such as the midpoint of two numbers or an ordered string) makes a move a single write and handles simultaneous moves better. It needs a rebalancing strategy once precision runs out, and the data is harder to read. For boards with tens of cards, the simpler option was chosen.
-
-### Snapshot rollback vs per-action undo
-
-On failure the client restores a snapshot of the whole board taken before the action.
-
-- **Why:** one code path for every action, and no risk of forgetting an inverse operation when a new action is added.
-- **Cost:** if other changes were applied while the request was in flight (for example an event from a teammate), restoring the snapshot would also undo them. That is why a failure requests a quiet refetch afterwards, which brings the screen back in line with the server.
-- **Alternative:** per-action undo (apply the exact inverse of that one change) is more precise but needs an inverse for each action and careful ordering when several actions are pending.
-
-### Last-write-wins
-
-There are no version numbers, ETags or locks. If two people edit the same card at once, the request that reaches the server last overwrites the other. Two simultaneous moves are resolved the same way, with ties in position ordered by `_id` so the result is deterministic.
-
-- **Why:** it keeps the API and the UI simple, and for a small team board conflicts are rare and harmless.
-- **Cost:** a person can lose an edit without being told. Fixing it properly means versioning plus a conflict UI.
-
-### Other choices
-
-- **REST for writes, WebSocket only for pushing events.** Validation, error handling and optimistic rollback all work from ordinary request/response results. The socket is a one-way notification channel.
-- **Refetch instead of replaying missed events.** There are no event sequence numbers or history, and a reload of the whole board after every connect is simpler and always correct. It is wasteful for large boards.
-- **`ws` instead of Socket.IO.** Fewer moving parts and no custom protocol. Reconnection, which Socket.IO would provide, is written explicitly in the client hook.
-- **Express app separate from the server start-up** (`app.ts` vs `index.ts`), so the app can be imported without opening ports or connecting to a database.
-
-## Known limitations
-
-- **No authentication or authorization.** Anyone who can reach the site can read and change the board. The client id is a random label, not a security token, and the WebSocket server does not check the request origin.
-- **One shared board.** There are no accounts, multiple boards or permissions.
-- **Columns cannot be reordered.** A column's position is set when it is created.
-- **Last-write-wins** for concurrent edits (see above). A card edit form that is open while someone else changes the same card will overwrite their change when saved.
-- **Renumbering is not transactional.** A move updates cards one by one; if the process fails midway, positions in that column may be inconsistent until the next move. Deleting a column and then its cards is also two separate operations.
-- **Single server instance.** Broadcasting uses an in-memory list of sockets. Running several instances would need a shared publish/subscribe layer, such as Redis, so events reach clients connected to other instances.
-- **Missed events are recovered by full refetch**, not replay.
-- **Unsaved items are locked.** A card or column that is still being created cannot be edited, deleted or dragged until the server answers.
-- **Deleting a card** leaves a gap in the positions (harmless; the next move in that column renumbers it). Card deletion has no confirmation, while column deletion uses the browser's `confirm` dialog.
-- **No rate limiting or pagination.**
-- **Test coverage.** Drag and drop is exercised only by the Playwright tests (mouse and keyboard), because jsdom cannot perform real drags. The server has no automated tests yet.
-- **Moving a card needs a drag gesture.** There is no click-only alternative such as a "Move to column" menu (WCAG 2.5.7, new in 2.2). The keyboard route exists.
-- **Fonts** are loaded from Google Fonts in `client/index.html`, so the first paint depends on that external request.
-- **Free hosting tiers** may stop an idle server. The first request after a pause can be slow, and the client reconnects on its own.
+---
 
 ## Deployment
 
-The recommended setup is MongoDB Atlas for the database, Render for the server and Vercel for the client. Deploy in this order, because each step needs the URL from the previous one.
-
 ### 1. MongoDB Atlas
 
-1. Create a cluster (the free tier is enough).
-2. Under **Database Access**, create a database user with a strong password. If the password contains special characters, URL-encode them in the connection string.
-3. Under **Network Access**, allow Render to connect. Render's free instances do not have fixed outbound IPs, so the simplest option is `0.0.0.0/0` (anywhere). This is only acceptable with a strong password; restrict it if your Render plan offers static outbound IPs.
-4. Copy the connection string and **add the database name** after the host:
-   `mongodb+srv://<user>:<password>@<cluster>.mongodb.net/kanban?retryWrites=true&w=majority`
+1. Create a free M0 cluster.
+2. Under **Database Access**, create a user with read/write privileges.
+3. Under **Network Access**, add `0.0.0.0/0` (or your static outbound IPs).
+4. Copy the connection URI and include the database name: `mongodb+srv://<user>:<password>@<cluster>.mongodb.net/kanban?retryWrites=true&w=majority`.
 
 ### 2. Server on Render
 
-Create a **Web Service** from your repository with these settings:
+Create a **Web Service** pointing to the repository:
 
 | Setting | Value |
-| --- | --- |
+| :--- | :--- |
 | Root Directory | `server` |
 | Runtime | Node |
 | Build Command | `npm install --include=dev && npm run build` |
 | Start Command | `npm start` |
 | Health Check Path | `/api/health` |
 
-The `--include=dev` flag matters: the build needs `typescript`, which is a dev dependency.
-
-Environment variables:
+**Environment Variables:**
 
 | Variable | Value |
-| --- | --- |
-| `MONGODB_URI` | The Atlas connection string from step 1 |
-| `CLIENT_ORIGIN` | Your Vercel URL, for example `https://your-app.vercel.app`. No trailing slash. Separate several origins with commas |
+| :--- | :--- |
+| `NODE_ENV` | `production` |
+| `MONGODB_URI` | Your MongoDB Atlas connection string |
+| `CLIENT_ORIGIN` | `https://<your-vercel-app>.vercel.app` (no trailing slash) |
+| `JWT_ACCESS_SECRET` | 48-byte secret generated via `openssl rand -base64 48` |
+| `JWT_REFRESH_SECRET` | Different 48-byte secret generated via `openssl rand -base64 48` |
+| `COOKIE_SECURE` | `true` |
 
-Do not set `PORT`: Render provides it and the server reads it. WebSockets work on the same port, and the service is reachable as `https://<service>.onrender.com` (REST) and `wss://<service>.onrender.com/ws` (WebSocket).
-
-If you do not know the Vercel URL yet, deploy with a temporary `CLIENT_ORIGIN`, then update it after step 3. Render redeploys when an environment variable changes.
+*(Render automatically assigns `PORT`)*.
 
 ### 3. Client on Vercel
 
-Import the repository as a project with these settings:
+Import the repository as a **Vercel** project:
 
 | Setting | Value |
-| --- | --- |
+| :--- | :--- |
 | Root Directory | `client` |
 | Framework Preset | Vite |
 | Build Command | `npm run build` |
 | Output Directory | `dist` |
 
-Environment variables (set them **before** the first build):
+**Configuration & Rewrites:**
+The repository includes [client/vercel.json](file:///c:/Users/DELL/OneDrive/Desktop/kanban-boardF/kanban-board/client/vercel.json), which proxies `/api/*` requests directly to your Render backend:
+
+```json
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://<your-render-service>.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
+```
+
+Update `<your-render-service>` in `client/vercel.json` with your Render domain, and set:
 
 | Variable | Value |
-| --- | --- |
-| `VITE_API_URL` | `https://<service>.onrender.com` |
-| `VITE_WS_URL` | `wss://<service>.onrender.com/ws` |
+| :--- | :--- |
+| `VITE_WS_URL` | `wss://<your-render-service>.onrender.com/ws` |
 
-Use `wss://`, not `ws://`: a page served over HTTPS may not open an unencrypted WebSocket, and the browser will block it.
+*(Note: `VITE_API_URL` is omitted or empty so that all REST requests route through the same-origin Vercel rewrite).*
 
-Because Vite bakes these values in at build time, changing them later requires a redeploy. The app is a single page with no client-side routes, so no rewrite rules are needed.
+---
 
-Once Vercel gives you the final URL, put it in `CLIENT_ORIGIN` on Render (step 2) if you have not already.
-
-### Common problems
-
-- **CORS errors in the browser console:** `CLIENT_ORIGIN` does not exactly match the page's origin (check for a trailing slash, `http` vs `https`, or a preview-deployment URL that is not listed).
-- **Badge stuck on "Reconnecting…":** `VITE_WS_URL` is wrong, uses `ws://` on an HTTPS site, or is missing `/ws`.
-- **First request is slow after a quiet period:** the free server instance was paused and is starting up.
-- **Server fails to start on Render with a configuration message:** `MONGODB_URI` is missing or invalid. The log lists the problem.
-- **Server starts but requests fail with database errors:** the Atlas network access list or user credentials need fixing.
-
-## Post-deploy checklist
+## Post-Deploy Checklist
 
 - [ ] `https://<service>.onrender.com/api/health` returns `{"status":"ok","database":"connected"}`.
-- [ ] Opening the Vercel URL loads the board, and the badge shows **Live**.
-- [ ] In the browser dev tools, the Network tab shows a `wss://` connection to `/ws` with status 101.
-- [ ] No CORS errors in the console while adding a column and a card.
-- [ ] Open the site in two separate windows: a card created, edited, moved and deleted in one appears in the other without a refresh.
-- [ ] Reload one window: the data persists (it comes from Atlas).
-- [ ] Switch a window to **Offline** in the dev tools Network tab and add a card: it appears, then disappears with an error toast. Switch back online and confirm the badge returns to **Live**.
-- [ ] Leave the site idle long enough for the server to pause, then use it again and confirm it reconnects and shows current data.
-- [ ] The Atlas collections `columns` and `cards` contain the data you created.
-- [ ] Replace the demo and screenshot placeholders at the top of this README.
+- [ ] Navigating to the Vercel URL loads the application and presents `/login`.
+- [ ] User registration works: creates an account and redirects to `/boards`.
+- [ ] Creating a board navigates to `/boards/:boardId` and connection status badge displays **Live**.
+- [ ] Opening the same board in two windows reflects card creation and drag-and-drop in real time without refreshing.
+- [ ] Logging out redirects to `/login` and terminates the WebSocket connection.
+- [ ] Registering a second user confirms that User A's boards are invisible to User B.

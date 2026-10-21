@@ -134,7 +134,6 @@ describe("adding a card", () => {
       "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
       "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
       "POST /api/boards/board-1/cards": () => serverAnswer.promise,
-      "POST /api/cards": () => serverAnswer.promise,
     });
     render(<App />);
 
@@ -167,7 +166,7 @@ describe("adding a card", () => {
 
     // The temporary id is a client-side detail and must never reach the server.
     const request = calls.find(
-      (call) => call.method === "POST" && (call.path === "/api/boards/board-1/cards" || call.path === "/api/cards"),
+      (call) => call.method === "POST" && call.path === "/api/boards/board-1/cards",
     );
     expect(request?.body).toEqual({
       columnId: "col-todo",
@@ -201,7 +200,6 @@ describe("adding a card", () => {
       "POST /api/auth/ws-ticket": () => jsonResponse(200, { ticket: "ticket-1" }),
       "GET /api/boards/board-1": () => jsonResponse(200, boardApiResponse),
       "POST /api/boards/board-1/cards": () => serverAnswer.promise,
-      "POST /api/cards": () => serverAnswer.promise,
     });
     render(<App />);
 
