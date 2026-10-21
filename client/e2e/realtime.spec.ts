@@ -69,7 +69,7 @@ test("an unreachable API rolls the optimistic card back and shows an error toast
     releaseRequest = resolve;
   });
 
-  await page.route("**/api/cards", async (route) => {
+  await page.route("**/api/**/cards", async (route) => {
     // Only the create request is blocked. The browser's preflight and the
     // board refetch after a failure must keep working normally.
     if (route.request().method() !== "POST") {

@@ -335,5 +335,12 @@ boardsRouter.patch("/:boardId/cards/:id/move", async (req, res) => {
     );
   }
 
-  res.json({ cards: modifiedCards.map(toCardDto) });
+  const affectedColumnIds =
+    sourceColumnId === targetColumnId ? [targetColumnId] : [sourceColumnId, targetColumnId];
+  const affectedCards = await Card.find({
+    columnId: { $in: affectedColumnIds },
+    userId,
+  }).sort({ position: 1, _id: 1 });
+
+  res.json({ cards: affectedCards.map(toCardDto) });
 });

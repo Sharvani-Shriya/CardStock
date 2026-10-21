@@ -21,8 +21,21 @@ import { RefreshToken } from "../models/RefreshToken.js";
 import { User } from "../models/User.js";
 import { issueWsTicket } from "../realtime.js";
 import { loginBody, registerBody, wsTicketBody } from "../schemas.js";
+import rateLimit from "express-rate-limit";
 
 export const authRouter = Router();
+
+// Rate limiting: 10 requests per 15 minutes per IP.
+// In test mode, only runs when x-test-rate-limit is "true" to prevent exhausting limit in general tests.
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  statusCode: 429,
+  message: { error: { message: "Too many requests, please try again later." } },
+  skip: (req) => process.env.NODE_ENV === "test" && req.headers["x-test-rate-limit"] !== "true",
+});
 
 // ---------------------------------------------------------------------------
 // Origin guard helper
@@ -49,7 +62,7 @@ function assertSameOrigin(req: Request): void {
 // ---------------------------------------------------------------------------
 // POST /api/auth/register
 // ---------------------------------------------------------------------------
-authRouter.post("/register", async (req, res) => {
+authRouter.post("/register", authLimiter, async (req, res) => {
   const body = parseWith(registerBody, req.body);
 
   // Normalise email the same way the User model does (lowercase) so the
@@ -84,7 +97,7 @@ authRouter.post("/register", async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/auth/login
 // ---------------------------------------------------------------------------
-authRouter.post("/login", async (req, res) => {
+authRouter.post("/login", authLimiter, async (req, res) => {
   const body = parseWith(loginBody, req.body);
   const email = body.email.toLowerCase().trim();
 
@@ -126,7 +139,7 @@ authRouter.post("/login", async (req, res) => {
 // The client sends no Authorization header here; authentication is entirely
 // via the HttpOnly cookie.  On success it issues a new access token AND rotates
 // the refresh token (old one is revoked, new one is set in the cookie).
-authRouter.post("/refresh", async (req, res) => {
+authRouter.post("/refresh", authLimiter, async (req, res) => {
   assertSameOrigin(req);
 
   const rawToken = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
@@ -138,9 +151,15 @@ authRouter.post("/refresh", async (req, res) => {
   const stored = await RefreshToken.findOne({ tokenHash });
 
   if (!stored) {
-    // The token is not in the database: either it was already rotated (reuse
-    // attack) or it never existed.  Clear the cookie so the browser does not
-    // keep replaying it, and return 401.
+    // The token is not in the database: either it was already revoked or it never existed.
+    clearRefreshCookie(res);
+    throw new HttpError(401, "Invalid or expired refresh token");
+  }
+
+  if (stored.isUsed) {
+    // REUSE ATTACK DETECTED: A rotated-out refresh token was presented again!
+    // Revoke the entire family immediately to protect against token theft.
+    await RefreshToken.deleteMany({ familyId: stored.familyId });
     clearRefreshCookie(res);
     throw new HttpError(401, "Invalid or expired refresh token");
   }
@@ -151,12 +170,12 @@ authRouter.post("/refresh", async (req, res) => {
     throw new HttpError(401, "Refresh token expired");
   }
 
-  // Rotate: delete the current token and issue a new one in the same family.
-  // Any future attempt to use the old token hash will find nothing in the DB.
+  // Mark the current token as used so any replay will trigger family revocation.
+  stored.isUsed = true;
+  await stored.save();
+
   const { familyId } = stored;
   const userId = (stored.userId as { toString(): string }).toString();
-
-  await stored.deleteOne();
 
   const { rawToken: newRaw, tokenHash: newHash } = generateRefreshToken();
   await RefreshToken.create({
@@ -164,6 +183,7 @@ authRouter.post("/refresh", async (req, res) => {
     userId: stored.userId,
     familyId,  // keep the same family so revoke-all is still possible
     expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+    isUsed: false,
   });
 
   // Re-fetch the user to get the current email (it could have changed).

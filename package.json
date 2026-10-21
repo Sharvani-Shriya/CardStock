@@ -1,0 +1,13 @@
+{
+  "name": "kanban-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "npm run test --prefix server && npm run test --prefix client",
+    "test:server": "npm run test --prefix server",
+    "test:client": "npm run test --prefix client",
+    "test:e2e": "npm run test:e2e --prefix client",
+    "typecheck": "npm run typecheck --prefix server && npm run typecheck --prefix client",
+    "build": "npm run build --prefix server && npm run build --prefix client"
+  }
+}

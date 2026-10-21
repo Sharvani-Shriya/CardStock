@@ -1,6 +1,7 @@
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express, { type Express } from "express";
+import helmet from "helmet";
 import mongoose from "mongoose";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { authRouter } from "./routes/auth.js";
@@ -20,6 +21,7 @@ interface AppOptions {
 export function createApp({ clientOrigin }: AppOptions): Express {
   const app = express();
 
+  app.use(helmet());
   app.use(
     cors({
       origin: clientOrigin.split(",").map((origin) => origin.trim()),

@@ -51,18 +51,25 @@ export function attachWebSocketServer(server: Server): WebSocketServer {
     const url = new URL(request.url ?? "/ws", "http://localhost");
     const clientId = url.searchParams.get("clientId") ?? "";
     const ticketParam = url.searchParams.get("ticket");
-    const boardIdParam = url.searchParams.get("boardId");
 
     let userId: string | undefined;
-    let boardId: string | undefined = boardIdParam ?? undefined;
+    let boardId: string | undefined;
 
     if (ticketParam) {
       const stored = wsTickets.get(ticketParam);
-      if (stored && stored.expiresAt > Date.now()) {
-        userId = stored.userId;
-        boardId = stored.boardId;
-        wsTickets.delete(ticketParam);
+      if (!stored) {
+        socket.close(4003, "Invalid or reused ticket");
+        return;
       }
+      if (stored.expiresAt <= Date.now()) {
+        wsTickets.delete(ticketParam);
+        socket.close(4002, "Expired ticket");
+        return;
+      }
+      // Valid ticket: consume immediately so it cannot be reused
+      userId = stored.userId;
+      boardId = stored.boardId;
+      wsTickets.delete(ticketParam);
     }
 
     const info: ClientInfo = {
@@ -72,6 +79,17 @@ export function attachWebSocketServer(server: Server): WebSocketServer {
       isAlive: true,
     };
     clients.set(socket, info);
+
+    // If connection was opened without a ticket, close within 5s
+    if (!userId) {
+      const timer = setTimeout(() => {
+        if (!info.userId) {
+          socket.terminate();
+          clients.delete(socket);
+        }
+      }, 5000);
+      socket.on("close", () => clearTimeout(timer));
+    }
 
     socket.on("pong", () => {
       info.isAlive = true;

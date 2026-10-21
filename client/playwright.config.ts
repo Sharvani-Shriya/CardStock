@@ -51,6 +51,7 @@ export default defineConfig({
       // overrides existing variables). That is what keeps the tests away from
       // the real development database.
       env: {
+        NODE_ENV: "test",
         PORT: SERVER_PORT,
         MONGODB_URI: E2E_MONGODB_URI,
         CLIENT_ORIGIN: CLIENT_URL,

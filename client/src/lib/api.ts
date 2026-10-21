@@ -17,26 +17,13 @@ interface RequestOptions {
   _isRetry?: boolean;
 }
 
-// Single in-flight refresh promise so parallel 401s coalesce into one POST /api/auth/refresh call.
+// Single in-flight refresh promise so parallel calls coalesce into one POST /api/auth/refresh call.
 let refreshPromise: Promise<string | null> | null = null;
+let inFlightAuthRefresh: Promise<AuthResponse> | null = null;
 
 async function performRefresh(): Promise<string | null> {
   try {
-    const response = await fetch(`${API_URL}/api/auth/refresh`, {
-      method: "POST",
-      headers: {
-        "X-Client-Id": CLIENT_ID,
-        "Content-Type": "application/json",
-      },
-      // HttpOnly refresh cookie is sent automatically by the browser
-      credentials: "include",
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = (await response.json()) as AuthResponse;
+    const data = await refreshToken();
     useAuthStore.getState().setSession(data.user, data.accessToken);
     return data.accessToken;
   } catch {
@@ -129,7 +116,13 @@ export function login(body: { email: string; password: string }): Promise<AuthRe
 }
 
 export function refreshToken(): Promise<AuthResponse> {
-  return request<AuthResponse>("/api/auth/refresh", { method: "POST" });
+  if (inFlightAuthRefresh) {
+    return inFlightAuthRefresh;
+  }
+  inFlightAuthRefresh = request<AuthResponse>("/api/auth/refresh", { method: "POST" }).finally(() => {
+    inFlightAuthRefresh = null;
+  });
+  return inFlightAuthRefresh;
 }
 
 export function logout(): Promise<void> {

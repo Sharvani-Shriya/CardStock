@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
+import { getActiveAuth } from "./api";
 
 // Everything here finds elements by ARIA role and accessible name, the way a
 // screen-reader user would. CSS classes are avoided on purpose: they change
@@ -19,9 +20,15 @@ export function cardIn(page: Page, columnTitle: string, cardTitle: string): Loca
 // Waits for the "Live" badge, not just for the page to load. Until the socket is
 // open the window cannot receive events, and a test that creates data too early
 // would pass for the wrong reason (the card would arrive via the first load).
-export async function openBoard(page: Page): Promise<void> {
-  await page.goto("/");
-  await expect(page.getByRole("status").filter({ hasText: "Live" })).toBeVisible();
+export async function openBoard(page: Page, boardId?: string): Promise<void> {
+  const { boardId: activeId } = getActiveAuth();
+  const targetId = boardId || activeId;
+  const targetPath = targetId ? `/boards/${targetId}` : "/";
+  if (!page.url().includes(targetPath)) {
+    await page.goto(targetPath);
+  }
+  await expect(page.getByRole("status").filter({ hasText: "Live" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#board")).toHaveAttribute("aria-busy", "false", { timeout: 15_000 });
 }
 
 export async function addCard(page: Page, columnTitle: string, cardTitle: string): Promise<void> {
@@ -91,5 +98,7 @@ export async function keyboardDrag(page: Page, cardTitle: string, keys: string[]
 
 // The titles of a column's cards, top to bottom, as a screen reader would list them.
 export async function cardTitlesIn(page: Page, columnTitle: string): Promise<string[]> {
-  return columnIn(page, columnTitle).getByRole("heading", { level: 3 }).allTextContents();
+  const column = columnIn(page, columnTitle);
+  await expect(column).toBeVisible({ timeout: 10_000 });
+  return column.getByRole("heading", { level: 3 }).allTextContents();
 }

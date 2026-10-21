@@ -37,6 +37,7 @@ async function registerUser(
 ): Promise<{ accessToken: string; cookie: string }> {
   const res = await request(app)
     .post("/api/auth/register")
+    .set("x-skip-rate-limit", "true")
     .send({ email, password });
 
   expect(res.status).toBe(201);
@@ -51,6 +52,7 @@ async function loginUser(
 ): Promise<{ accessToken: string; cookie: string }> {
   const res = await request(app)
     .post("/api/auth/login")
+    .set("x-skip-rate-limit", "true")
     .send({ email, password });
 
   expect(res.status).toBe(200);
@@ -203,28 +205,65 @@ describe("POST /api/auth/refresh", () => {
     expect(cookies.some((c) => c.startsWith("refreshToken="))).toBe(true);
   });
 
-  it("the old refresh token cannot be reused after rotation", async () => {
+  it("the old refresh token cannot be reused after rotation and revokes the whole family", async () => {
+    const { cookie: tokenA } = await registerUser("family@example.com");
+
+    // First refresh — rotates from tokenA to tokenB
+    const rotateRes = await request(app)
+      .post("/api/auth/refresh")
+      .set("x-skip-rate-limit", "true")
+      .set("Cookie", tokenA);
+
+    expect(rotateRes.status).toBe(200);
+    const cookies = extractSetCookie(rotateRes.headers);
+    const tokenB = cookies.find((c) => c.startsWith("refreshToken=")) ?? "";
+    expect(tokenB).toBeTruthy();
+
+    // Replay the original (now rotated-out) tokenA -> triggers reuse detection!
+    const reuseRes = await request(app)
+      .post("/api/auth/refresh")
+      .set("x-skip-rate-limit", "true")
+      .set("Cookie", tokenA);
+
+    expect(reuseRes.status).toBe(401);
+
+    // Because tokenA was reused, the entire token family was revoked.
+    // Thus, even the legitimate active tokenB must now be rejected!
+    const tokenBRes = await request(app)
+      .post("/api/auth/refresh")
+      .set("x-skip-rate-limit", "true")
+      .set("Cookie", tokenB);
+
+    expect(tokenBRes.status).toBe(401);
+
+    // Verify all tokens in the database for this family are deleted
+    const count = await RefreshToken.countDocuments();
+    expect(count).toBe(0);
+  });
+
+  it("rejects a bad Origin header with 403 Forbidden", async () => {
     const { cookie } = await registerUser();
 
-    // First refresh — token rotates.
-    await request(app).post("/api/auth/refresh").set("Cookie", cookie);
-
-    // Replay the original (now rotated-out) token.
     const res = await request(app)
       .post("/api/auth/refresh")
+      .set("x-skip-rate-limit", "true")
+      .set("Origin", "https://malicious-attacker.com")
       .set("Cookie", cookie);
 
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(403);
   });
 
   it("returns 401 when no cookie is present", async () => {
-    const res = await request(app).post("/api/auth/refresh");
+    const res = await request(app)
+      .post("/api/auth/refresh")
+      .set("x-skip-rate-limit", "true");
     expect(res.status).toBe(401);
   });
 
   it("returns 401 for a garbage cookie value", async () => {
     const res = await request(app)
       .post("/api/auth/refresh")
+      .set("x-skip-rate-limit", "true")
       .set("Cookie", "refreshToken=garbage");
 
     expect(res.status).toBe(401);
@@ -251,9 +290,20 @@ describe("POST /api/auth/logout", () => {
   });
 
   it("succeeds even with no cookie", async () => {
-    const res = await request(app).post("/api/auth/logout");
+    const res = await request(app)
+      .post("/api/auth/logout")
+      .set("x-skip-rate-limit", "true");
     // 204 No Content — idempotent
     expect(res.status).toBe(204);
+  });
+
+  it("rejects a bad Origin header with 403 Forbidden", async () => {
+    const res = await request(app)
+      .post("/api/auth/logout")
+      .set("x-skip-rate-limit", "true")
+      .set("Origin", "https://malicious-attacker.com");
+
+    expect(res.status).toBe(403);
   });
 });
 
@@ -315,5 +365,29 @@ describe("GET /api/auth/me", () => {
       .set("Authorization", "Bearer not.a.valid.jwt");
 
     expect(res.status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+describe("Rate limiting", () => {
+  it("returns 429 after exceeding the rate limit", async () => {
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app)
+        .post("/api/auth/login")
+        .set("x-test-rate-limit", "true")
+        .send({ email: `rate${i}@example.com`, password: "password123" });
+      expect(res.status).not.toBe(429);
+    }
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("x-test-rate-limit", "true")
+      .send({ email: "rate_exceeded@example.com", password: "password123" });
+
+    expect(res.status).toBe(429);
+    expect(res.body.error.message).toMatch(/too many requests/i);
   });
 });

@@ -28,6 +28,11 @@ const refreshTokenSchema = new Schema({
   // every token.  The TTL index below handles automatic deletion; no separate
   // field-level index is needed (it would be a duplicate).
   expiresAt: { type: Date, required: true },
+
+  // Mark if this token has already been rotated (used).
+  // If a token with isUsed=true is presented again, reuse is detected and the
+  // entire family is revoked.
+  isUsed: { type: Boolean, default: false },
 });
 
 // MongoDB TTL index: the database engine deletes expired documents
